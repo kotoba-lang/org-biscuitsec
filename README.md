@@ -3,6 +3,10 @@
 **A token anyone can attenuate offline, that anyone can verify with no
 secret at all.**
 
+**The delegation centre of this workspace** (root ADR-2608180200): new
+principal-to-principal delegation is written here, and every other capability
+format keeps a named, narrower role.
+
 Origin plane of [biscuitsec.org](https://www.biscuitsec.org) — the format is
 Biscuit's, so the repo is named for where it comes from, not for what it does
 here. This is a **clean-room decision core**, not a port.
@@ -63,6 +67,63 @@ rather than *your rule fired*.
 Order is fixed: **verify → checks → policies.** Running policies first would
 let a token whose signature does not verify reach a rule that says `allow`.
 
+## Where it sits, repo-wide
+
+Five capability surfaces were measured across the fleet (root ADR-2608180200)
+and **four of them are not delegation at all** — which is why they never
+needed one format and why naming what each *is* was most of the work:
+
+| surface | what it actually is | revocation |
+|---|---|---|
+| `kotoba-lang/kotoba-lang` `capability-semantics.edn` | the **semantics**: `requested ∩ delegated ∩ local-policy` | at effect time |
+| `kotoba-lang/amu` `{:allow #{[:cap/call n]}}` | compile-time **admission** — what code may even ask for | signer set |
+| `kotoba-lang/aiueos` `capability-plan.kotoba` | a machine-local **capability table** (slot/generation/type/rights/owner) | **generation bump** |
+| `kotoba-lang/kototama` `component-authority` | a signed **epoch feed** for placement and revocation | monotonic epoch |
+| **here** | **delegation between principals** | — |
+
+The last column is the finding worth carrying: **a biscuit cannot revoke**,
+and two of the other four already can. So revocation rides the generation and
+epoch planes that exist rather than becoming a revocation list nobody serves.
+
+`biscuit.kotoba/->delegated` is the concrete seam. The semantics had four
+terms and three owners; **`delegated` had no wire**, and that slot is what
+"biscuit is the centre" means — not that biscuit replaces the semantics.
+
+```clojure
+(bk/->delegated token kinds)
+;; => {:grants [{:grant/kind :graph-read
+;;               :grant/resources ["kotoba://graph/acme"]
+;;               :grant/expires "2026-09-01T00:00:00Z" :grant/id "biscuit:…"}]
+;;     :grant/rejected [{:kind :kernel/format-disk :resource "/dev/sda"}]}
+```
+
+It maps to `:grant/*` and never to `:cap/*`: a capability is what a handler
+receives **after** intersection, and a token that produced one directly would
+have skipped the step the semantics says is not optional. A kind outside the
+closed `:kinds` set is **rejected, not ignored** — ignoring silently drops a
+restriction the issuer meant, so the failure is toward less authority and is
+visible in `:grant/rejected`.
+
+## Scored against the alternatives
+
+Root ADR-2608180200, 0–5, weighted for this workspace:
+
+| | offline | **verify w/o secret** | attenuation | expressiveness | revocation | wire maturity | implemented here | total |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| **biscuit** | 5 | **5** | 5 | **5** | 3 | 2 | 4 | **29** |
+| UCAN | 5 | 5 | 5 | 3 | 4 | 4 | 4 | **30** |
+| CACAO | 5 | 5 | 2 | 2 | 3 | 4 | 5 | 26 |
+| VC/VP | 5 | 5 | 0 | 4 | 4 | 5 | 4 | 27 |
+| macaroon | 5 | **0** | 5 | 3 | 2 | 2 | 4 | 21 |
+| mTLS / X.509 | 4 | 5 | 0 | 1 | 2 | 5 | 3 | 20 |
+| OAuth2 / JWT | 4 | 4 | 0 | 2 | 1 | 5 | 3 | 19 |
+| bearer token | 0 | 0 | 0 | 0 | 5 | 5 | 5 | 15 |
+
+**UCAN scores one point higher and was not chosen.** The gap is wire maturity
+and revocation; biscuit wins expressiveness by two, and this workspace speaks
+Datalog — so delegation conditions written in Datalog are worth more here than
+elsewhere. The table is recorded as the *reason*, not as the decision.
+
 ## The Datalog, and why it is not a second copy of `kotoba-lang/datalog`
 
 | | `kotoba-lang/datalog` | here |
@@ -109,8 +170,8 @@ with two scopes reach nothing: safe, and wrong.
 
 ## Verification
 
-`clojure -M:test` and `npm run test:nbb` — **22 tests, 49 assertions**, both
-green. Shown red on four real defects and green again with each reverted:
+`clojure -M:test` and `npm run test:nbb` — **29 tests, 63 assertions**, both
+green. Shown red on six real defects and green again with each reverted:
 
 | broken | failures |
 |---|---:|
@@ -118,6 +179,8 @@ green. Shown red on four real defects and green again with each reverted:
 | the signature stops covering `next-public-key` | 2 |
 | the Datalog budget truncates instead of refusing | 1 |
 | a later block can extend an expiry | 2 |
+| a kind outside the closed set is admitted instead of rejected | 3 |
+| a later block may add kinds and resources (attenuation stops being only-attenuation) | 3 |
 
 The second was **found by the exercise**: nothing had checked that a block
 cannot be spliced onto a different continuation. The attack it permits is

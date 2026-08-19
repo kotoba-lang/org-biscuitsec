@@ -1,5 +1,10 @@
 {:paths ["src"]
- :deps {io.github.kotoba-lang/authority
+ :deps {;; The wire format's protobuf codec. `biscuit.wire` is the interop
+        ;; face; the model namespaces do not require it.
+        io.github.kotoba-lang/dev-protobuf
+        {:git/url "https://github.com/kotoba-lang/dev-protobuf.git"
+         :git/sha "3f20b1e1cdbe89750d8afaf24f64777a2f170c3c"}
+        io.github.kotoba-lang/authority
         {:git/url "https://github.com/kotoba-lang/authority.git"
          :git/sha "232eef9b7969aa5990f9b5e48b1184f078500781"}}
  :aliases

@@ -80,3 +80,25 @@
                               :format "der" :type "spki"})
                         (js/Buffer.from (clj->js (vec signature)))))
     (catch #?(:clj Exception :cljs :default) _ false)))
+
+(defn verify-bytes-fn
+  "The same verifier, over a byte payload rather than a string.
+
+  `biscuit.wire` signs raw bytes -- a protobuf-serialised block, not text --
+  and handing those to the string path stringifies the vector and verifies a
+  signature over the wrong bytes. That failure looks exactly like a bad
+  signature, which cost a debugging pass; the two paths are separate
+  functions so it cannot recur silently."
+  [public-key* payload signature]
+  (try
+    #?(:clj (let [s (doto (Signature/getInstance "Ed25519")
+                      (.initVerify (public-key public-key*))
+                      (.update (byte-array (->signed-bytes payload))))]
+              (.verify s (byte-array (->signed-bytes signature))))
+       :cljs (nc/verify nil
+                        (js/Buffer.from (clj->js (vec payload)))
+                        (nc/createPublicKey
+                         #js {:key (js/Buffer.from (clj->js (vec (concat spki-prefix public-key*))))
+                              :format "der" :type "spki"})
+                        (js/Buffer.from (clj->js (vec signature)))))
+    (catch #?(:clj Exception :cljs :default) _ false)))

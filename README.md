@@ -192,11 +192,15 @@ with two scopes reach nothing: safe, and wrong.
 
 ## What it refuses, by name
 
-- **The wire format.** Biscuit v3 is protobuf + Ed25519. This holds the
-  decision core and a canonical EDN encoding; it does **not** read or write
-  biscuit protobuf and does not claim interoperability with `biscuit-auth`.
-  A partial decoder that guessed would produce plausible tokens, which is
-  worse than none.
+- **Writing the wire format.** `biscuit.wire` **reads** biscuit v3 protobuf
+  and verifies its signature chain against `biscuit-auth`'s own samples (see
+  below). It does not write one: a writer whose output nothing external has
+  accepted is the claim `org-apache-parquet` learned to distrust from inside
+  its own passing suite.
+- **Expressions** (`Op` / `OpUnary` / `OpBinary` / `OpClosure`). Rules and
+  checks are counted, not decoded. This is where a partial decoder would do
+  real damage — an operator it silently dropped is a *check that no longer
+  restricts*, which reads as a more permissive token rather than an error.
 - **Crypto.** `sign-fn` / `verify-fn` injected, no default Ed25519.
 - **Third-party blocks.** Refused in `append` rather than approximated.
 
@@ -218,9 +222,34 @@ perfectly consistent** — a well-formed biscuit in every respect. It verifies
 under its own root and is worthless under ours, and the only thing separating
 the two is the root key the edge was given.
 
+## It reads a token `biscuit-auth` minted
+
+Every other suite here checks this library against itself. `biscuit.wire`
+checks it against the reference implementation, using that project's own
+`samples/current` fixtures:
+
+```clojure
+(w/blocks-with-facts (w/decode-token (sample "test001_basic")))
+;; facts => [["right" "file1" "read"] ["right" "file2" "read"] ["right" "file1" "write"]]
+
+(w/verify (w/decode-token (sample "test001_basic")) root-public-key verify-bytes)
+;; => {:ok? true :blocks 2}
+```
+
+and the three negative samples — a different root key, an altered signature
+byte, reordered blocks — are all refused.
+
+**The signature byte order was decided by the sample, not by me.** The spec's
+v0 section lists the payload parts as data, next key, algorithm; the v1
+section orders them data, algorithm, next key. Rather than pick one and
+produce plausible verifications, both are expressible and `test001_basic.bc`
+was allowed to decide: `data ‖ alg(LE32) ‖ next_key` verifies, and there is a
+test asserting the **other order fails**, because a positive result nothing
+could have failed proves nothing.
+
 ## Verification
 
-`clojure -M:test` and `npm run test:nbb` — **43 tests, 107 assertions**, both
+`clojure -M:test` and `npm run test:nbb` — **49 tests, 120 assertions**, both
 green. Shown red on ten real defects and green again with each reverted:
 
 | broken | failures |

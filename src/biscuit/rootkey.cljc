@@ -67,6 +67,19 @@
    "next" next-key-digest
    "prev" prev-digest})
 
+(defn canonical
+  "The bytes a record's digest is taken over.
+
+  Without this the publisher and the verifier can disagree about what a
+  record *is*, and the hash link becomes a comparison of two different
+  renderings of the same value. Keys are sorted and the whole thing is
+  printed once, here, so both sides read the same function — the same reason
+  `record` itself is one function.
+
+  `record-digest` is excluded: a record cannot contain its own address."
+  [r]
+  (pr-str (into (sorted-map) (dissoc r "record-digest"))))
+
 (defn- well-formed? [r subject]
   (and (map? r)
        (= version (get r "v"))

@@ -156,3 +156,12 @@
           chain [(with-digest other-genesis) (with-digest r2)]]
       ;; r2 names the ORIGINAL genesis, so following the other one breaks.
       (is (= :broken-hash-link (:refused (rk/verify-log chain opts)))))))
+
+(deftest the-canonical-form-does-not-depend-on-key-order
+  (testing "publisher and verifier must read the same bytes for the same value"
+    (let [a genesis
+          b (into {} (reverse (seq genesis)))]
+      (is (= (rk/canonical a) (rk/canonical b)))))
+  (testing "and a record cannot contain its own address"
+    (is (= (rk/canonical genesis)
+           (rk/canonical (assoc genesis "record-digest" "anything"))))))

@@ -305,6 +305,30 @@ answers subject B with subject A's genuinely-signed record and nothing was
 forged), and the signer must be constrained by something **outside** the
 record (or the check is *somebody signed this*, which any keypair satisfies).
 
+## Revocation, which this library computes and does not distribute
+
+Per the spec, a block's revocation identifier **is its signature**. So
+`revocation-ids` needs no clock and no contact with the issuer, and
+`revoked?` is a set membership test:
+
+```clojure
+(w/revoked? token #{parent-signature})   ;; => true, for every token derived from it
+```
+
+Two properties come free and both matter. A revocation identifies a **tail**,
+not a holder — revoking the authority block kills everything derived from it,
+revoking a later block kills only the attenuations carrying it, and the
+revoker never has to know what was derived. And it is **offline**: a verifier
+holding the set refuses without asking anyone, which is the same property
+`biscuit.rootkey` gives key discovery.
+
+**Where the set comes from is not decided here.** Root ADR-2608180200 puts
+it on the planes that already carry monotonic signed state —
+`kototama.component-authority`'s epoch feed and aiueos's capability
+generations — rather than inventing a revocation list nobody serves. Those
+two can already revoke; a biscuit could not, and this is the half that lets
+them.
+
 ## Verification
 
 `clojure -M:test` and `npm run test:nbb` — **49 tests, 120 assertions**, both

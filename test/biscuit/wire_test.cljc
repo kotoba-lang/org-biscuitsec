@@ -89,3 +89,26 @@
       ;; It converts fine. That is the hazard, and why the docstring says so.
       (is (seq (:biscuit/blocks (w/token->model bad))))
       (is (false? (:ok? (w/verify bad root-public-key e/verify-bytes-fn)))))))
+
+(deftest revocation-identifiers-are-the-block-signatures
+  (testing "per the spec: a block's revocation id IS its signature"
+    (let [t (w/decode-token (sample "test001_basic"))
+          ids (w/revocation-ids t)]
+      (is (= 2 (count ids)))
+      (is (= [0 1] (mapv first ids)))
+      (is (= (:signature (first (:blocks t))) (second (first ids))))
+      (testing "and they are 64 bytes, because Ed25519 signatures are"
+        (is (every? #(= 64 (count (second %))) ids))))))
+
+(deftest revoking-a-parent-revokes-what-was-derived-from-it
+  (testing "an attenuated token still carries its parent's signature, so the
+            revoker does not need to know what was derived"
+    (let [t (w/decode-token (sample "test001_basic"))
+          parent-sig (:signature (first (:blocks t)))
+          child-sig (:signature (second (:blocks t)))]
+      (is (true? (w/revoked? t #{parent-sig})))
+      (is (true? (w/revoked? t #{child-sig})))
+      (testing "and an unrelated signature revokes nothing"
+        (is (false? (w/revoked? t #{(vec (repeat 64 0))}))))
+      (testing "as does an empty set"
+        (is (false? (w/revoked? t #{})))))))

@@ -229,3 +229,40 @@
             :block/next-public-key (:next-key b)
             :block/signature (:signature b)})
          (map-indexed #(assoc %2 :index %1) (blocks-with-facts token)))})
+
+(defn revocation-ids
+  "`[[index signature-bytes] …]` — the token's revocation identifiers.
+
+  Per the spec: a block's revocation identifier **is its signature**, because
+  the signature uniquely identifies that block. So revoking a token means
+  publishing a signature, and checking is a set membership test that needs no
+  parsing of what the token says.
+
+  Two properties fall out and both matter here:
+
+  - **A revocation identifies a token's TAIL, not its holder.** Revoking the
+    authority block's id kills every token derived from it; revoking a later
+    block's id kills only the attenuations that carry it. That is the right
+    granularity for a delegation chain and it comes free.
+  - **It needs no clock and no issuer contact.** A verifier holding the set
+    can refuse offline, which is the property the rest of this library is
+    built around — `biscuit.rootkey` removed the issuer from key discovery,
+    and this removes it from revocation.
+
+  What this namespace does NOT do is decide where the set comes from. Root
+  ADR-2608180200 puts that on the planes that already carry monotonic signed
+  state — `kototama.component-authority`'s epoch feed and aiueos's capability
+  generations — rather than inventing a revocation list nobody serves."
+  [token]
+  (vec (map-indexed (fn [i b] [i (vec (:signature b))]) (:blocks token))))
+
+(defn revoked?
+  "Is any of this token's blocks revoked by `revoked-set`?
+
+  `revoked-set` holds signature byte-vectors. Answering on ANY block rather
+  than only the last is the point: an attenuated token still carries its
+  parent's signature, so revoking a parent revokes everything derived from
+  it without the revoker needing to know what was derived."
+  [token revoked-set]
+  (boolean (some (fn [[_ sig]] (contains? (set revoked-set) sig))
+                 (revocation-ids token))))

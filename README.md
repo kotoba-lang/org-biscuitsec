@@ -104,6 +104,38 @@ closed `:kinds` set is **rejected, not ignored** — ignoring silently drops a
 restriction the issuer meant, so the failure is toward less authority and is
 visible in `:grant/rejected`.
 
+## The guarded call — the slice that makes it the centre
+
+`biscuit.effective/authorize` answers what a host actually asks — *may this
+call proceed* — and it needs **the token, the root public key, the local
+policy and a clock. No secret, on any branch.** That is what lets it run in a
+Worker, a browser or on an untrusted mirror, and it is the entire reason the
+centre is biscuit and not macaroon.
+
+```clojure
+(eff/authorize {:semantics semantics :token t
+                :root-public-key pk :verify-fn verify
+                :requested {:cap/kind :graph-read :cap/resource "kotoba://graph/acme"}
+                :local-policy {:policy/allow [...] :policy/forbid-wildcard true}
+                :now now :call "graph/read"})
+;; => {:allowed? true :reason :granted
+;;     :capability {:cap/kind :graph-read :cap/resource "…" :cap/provenance :biscuit}
+;;     :receipt {:receipt/at … :receipt/call … :receipt/cap … :receipt/outcome :allowed}}
+```
+
+**The rules are read, not restated.** `authorize` takes the semantics map and
+branches on its `:rules`; copying `:unknown-kind :deny` into a `case` here
+would make this a second statement of the language's policy. A contract test
+loads the real `lang/capability-semantics.edn` and fails when the rule set
+changes shape — and **refuses rather than passing when it cannot read the
+file**, because a contract test that cannot see the contract has not checked
+one.
+
+**Every attempt is receipted, including the denials.**
+`:attempt-always-receipted true` is in the semantics, and a guard that logs
+what it allowed and forgets what it refused cannot answer the only question
+an incident asks.
+
 ## Scored against the alternatives
 
 Root ADR-2608180200, 0–5, weighted for this workspace:
@@ -170,8 +202,8 @@ with two scopes reach nothing: safe, and wrong.
 
 ## Verification
 
-`clojure -M:test` and `npm run test:nbb` — **29 tests, 63 assertions**, both
-green. Shown red on six real defects and green again with each reverted:
+`clojure -M:test` and `npm run test:nbb` — **38 tests, 95 assertions**, both
+green. Shown red on nine real defects and green again with each reverted:
 
 | broken | failures |
 |---|---:|
@@ -181,6 +213,9 @@ green. Shown red on six real defects and green again with each reverted:
 | a later block can extend an expiry | 2 |
 | a kind outside the closed set is admitted instead of rejected | 3 |
 | a later block may add kinds and resources (attenuation stops being only-attenuation) | 3 |
+| the local-policy term is dropped from the intersection | 1 |
+| denials are not receipted | 7 |
+| the contract file is unreadable (must fail, not pass) | 1 |
 
 The second was **found by the exercise**: nothing had checked that a block
 cannot be spliced onto a different continuation. The attack it permits is
@@ -188,7 +223,11 @@ complete — rewrite a signed block's `next-public-key` to a key you control,
 append blocks you sign, and the chain verifies. That test now exists, and it
 is the strongest one in the suite.
 
-A fifth attempted break — "a later block can extend an expiry" — first
+Two attempted breaks first appeared to pass unbroken and had simply not
+applied — indentation mismatches in the edit. **A no-op break looks exactly
+like a missing test**, and the only way to tell them apart is to diff the
+file you claim to have broken. One of the two was real when redone (denials
+went unreceipted in seven places); the other — "a later block can extend an expiry" — first
 appeared to pass unbroken. The edit had silently not applied (indentation
 mismatch). **A no-op break looks exactly like a missing test**, and the only
 way to tell them apart is to diff the file you claim to have broken.

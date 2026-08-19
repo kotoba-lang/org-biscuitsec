@@ -34,6 +34,8 @@
   real token uses. The test is what keeps that honest."
   (:require [protobuf.wire :as pb]))
 
+(def version "biscuit/wire-v3")
+
 (def default-symbols
   "Indexes 0–27, reserved. Symbols a token defines start at 1024."
   ["read" "write" "resource" "operation" "right" "time" "role" "owner"
@@ -197,3 +199,33 @@
         (if (verify-fn key payload (:signature b))
           (recur more (:next-key b) (:signature b) (inc i))
           {:ok? false :reason :signature-mismatch :index i})))))
+
+(defn token->model
+  "A wire-decoded token in the shape the model namespaces consume.
+
+  `biscuit.authority/->grant`, `biscuit.kotoba/->delegated` and
+  `biscuit.effective/authorize` all read `{:biscuit/blocks [{:block/facts …}]}`
+  with **symbol** predicate heads, because that is what a hand-written token
+  looks like. A wire token's heads arrive as strings out of the symbol table.
+
+  Bridging here rather than teaching every consumer both shapes is the point:
+  without it a server accepts only tokens in a shape no other implementation
+  produces, and routing that would enshrine it.
+
+  Signature verification is NOT done here and must not be inferred from a
+  successful conversion — `verify` is a separate call, and a caller that
+  converts without verifying has decoded an attacker's facts."
+  [token]
+  {:biscuit/version version
+   :biscuit/blocks
+   (mapv (fn [b]
+           {:block/index (:index b)
+            :block/facts (mapv (fn [f]
+                                 (into [(if (string? (first f)) (symbol (first f)) (first f))]
+                                       (rest f)))
+                               (:facts b))
+            :block/rule-count (:rule-count b)
+            :block/check-count (:check-count b)
+            :block/next-public-key (:next-key b)
+            :block/signature (:signature b)})
+         (map-indexed #(assoc %2 :index %1) (blocks-with-facts token)))})

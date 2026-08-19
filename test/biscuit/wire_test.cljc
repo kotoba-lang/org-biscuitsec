@@ -71,3 +71,21 @@
                             8 {:name :public-keys :type :bytes :repeated true}}
                            {:symbols ["x"] :public-keys [[1 2 3]]})]
       (is (thrown? #?(:clj Exception :cljs :default) (w/decode-block block []))))))
+
+(deftest a-wire-token-reaches-the-model-namespaces
+  (testing "without this bridge a server accepts only a shape no other
+            implementation produces"
+    (let [m (w/token->model (w/decode-token (sample "test001_basic")))
+          facts (:block/facts (first (:biscuit/blocks m)))]
+      (is (= 2 (count (:biscuit/blocks m))))
+      (testing "predicate heads are symbols, as a hand-written token's are"
+        (is (every? symbol? (map first facts)))
+        (is (= '[right "file1" "read"] (first facts)))))))
+
+(deftest conversion-is-not-verification
+  (testing "a caller that converts without verifying has decoded an
+            attacker's facts, so the two must stay separate calls"
+    (let [bad (w/decode-token (sample "test002_different_root_key"))]
+      ;; It converts fine. That is the hazard, and why the docstring says so.
+      (is (seq (:biscuit/blocks (w/token->model bad))))
+      (is (false? (:ok? (w/verify bad root-public-key e/verify-bytes-fn)))))))

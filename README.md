@@ -200,10 +200,28 @@ with two scopes reach nothing: safe, and wrong.
 - **Crypto.** `sign-fn` / `verify-fn` injected, no default Ed25519.
 - **Third-party blocks.** Refused in `append` rather than approximated.
 
+## Real Ed25519, on both runtimes
+
+Most of the suite injects a deterministic stand-in and says so: the chain
+properties hold for any signature scheme. One suite does not.
+`biscuit.real-crypto-test` uses **the platform's own Ed25519** —
+`java.security.Signature` on the JVM, `node:crypto` under nbb, with the
+public key derived from a stored seed by `kotoba-lang/org-ietf-ed25519`
+rather than by generating a fresh pair. It checks that the payload this
+library asks to be signed is one Ed25519 actually signs and actually
+verifies, that a 64-byte signature comes back, and that a guarded call is
+decided **holding only the root public key**.
+
+It also holds the forgery a stand-in makes easy to miss: a token minted
+entirely by an attacker, naming their own successor key, is **internally
+perfectly consistent** — a well-formed biscuit in every respect. It verifies
+under its own root and is worthless under ours, and the only thing separating
+the two is the root key the edge was given.
+
 ## Verification
 
-`clojure -M:test` and `npm run test:nbb` — **38 tests, 95 assertions**, both
-green. Shown red on nine real defects and green again with each reverted:
+`clojure -M:test` and `npm run test:nbb` — **43 tests, 107 assertions**, both
+green. Shown red on ten real defects and green again with each reverted:
 
 | broken | failures |
 |---|---:|
@@ -216,6 +234,7 @@ green. Shown red on nine real defects and green again with each reverted:
 | the local-policy term is dropped from the intersection | 1 |
 | denials are not receipted | 7 |
 | the contract file is unreadable (must fail, not pass) | 1 |
+| a block may also validate against the key **it names** | 1 |
 
 The second was **found by the exercise**: nothing had checked that a block
 cannot be spliced onto a different continuation. The attack it permits is

@@ -52,14 +52,20 @@
 
 (defn record
   "The canonical map a signer signs and a verifier checks. One function, so
-  the two sides cannot drift."
-  [{:keys [subject seq keys next-key-digest prev-signature]}]
+  the two sides cannot drift.
+
+  `prev` is the **digest of the previous record**, not its signature, which
+  makes the log hash-linked: a record commits to the exact bytes of its
+  predecessor, so a chain cannot be re-parented onto a different history
+  without breaking a signature. `did:webvh` links its entries the same way,
+  and for the same reason."
+  [{:keys [subject seq keys next-key-digest prev-digest]}]
   {"v" version
    "subject" subject
    "seq" seq
    "keys" (mapv vec keys)
    "next" next-key-digest
-   "prev" prev-signature})
+   "prev" prev-digest})
 
 (defn- well-formed? [r subject]
   (and (map? r)
@@ -73,7 +79,8 @@
   "Walk a key-rotation log. -> `{:keys [...] :seq n :records n}` or
   `{:refused reason :at i}`.
 
-  `opts` is `{:subject s :genesis-key-digest d :digest-fn f :verify-fn f}`.
+  `opts` is `{:subject s :genesis-key-digest d :digest-fn f :verify-fn f
+  :record-digest-fn f}`.
 
   - `digest-fn` is `(fn [public-key] digest)` — injected, and the same
     function the publisher used, or every commitment fails to match.
@@ -90,7 +97,7 @@
     ;; that answered nothing, and treating it as a default is how a fetch
     ;; failure becomes an authority decision.
     {:refused :empty-log}
-    (loop [[r & more] records expected genesis-key-digest prev-sig nil i 0 last-seq nil]
+    (loop [[r & more] records expected genesis-key-digest prev-dig nil i 0 last-seq nil]
       (cond
         (nil? r) {:keys (mapv vec (get (nth records (dec (count records))) "keys"))
                   :seq (get (nth records (dec (count records))) "seq")
@@ -108,14 +115,20 @@
         ;; pinned. A host that cannot produce that key cannot rotate.
         {:refused :signer-not-committed :at i}
 
+        (not= prev-dig (get r "prev"))
+        ;; The hash link. A record that names a different predecessor is a
+        ;; different history, and accepting it would let a host graft one
+        ;; chain onto another's genesis.
+        {:refused :broken-hash-link :at i}
+
         (not (verify-fn (get r "signer")
                         (record {:subject subject :seq (get r "seq")
                                  :keys (get r "keys") :next-key-digest (get r "next")
-                                 :prev-signature prev-sig})
+                                 :prev-digest prev-dig})
                         (get r "sig")))
         {:refused :signature-mismatch :at i}
 
-        :else (recur more (get r "next") (get r "sig") (inc i) (get r "seq"))))))
+        :else (recur more (get r "next") (get r "record-digest") (inc i) (get r "seq"))))))
 
 (defn current-keys
   "The key set a verified log ends at, or nil. `nil` rather than a fallback:
@@ -123,3 +136,65 @@
   failure this namespace exists to prevent."
   [result]
   (when-not (:refused result) (:keys result)))
+
+;; ── publishing and resolving the log ────────────────────────────────────────
+
+(defn publish
+  "The objects a publisher must write for `records`, and the tip that names
+  the newest.
+
+  -> `{:objects {digest record} :tip digest :seq n}`.
+
+  Records are **immutable and content-addressed**, so a reader caches each
+  one forever and re-fetches only when the tip moves — which is the arithmetic
+  that made this the cheapest verifiable option (`bench/keydist.cljs`).
+
+  `record-digest-fn` addresses a whole record. It is a different function from
+  the `digest-fn` that addresses a public key, and passing one where the other
+  belongs is the kind of mistake that produces a log nobody can resolve, so
+  they are separate parameters rather than one."
+  [records record-digest-fn]
+  (when (seq records)
+    {:objects (into {} (map (fn [r] [(record-digest-fn r) r])) records)
+     :tip (record-digest-fn (last records))
+     :seq (get (last records) "seq")}))
+
+(def default-max-chain
+  "Records a resolver will walk before refusing. A tip is fetched from a host
+  that may be hostile; without a bound, `prev` pointers are an unbounded walk
+  it controls."
+  256)
+
+(defn resolve-log
+  "Walk back from `tip` to genesis, then hand the chain over in order.
+
+  `fetch-fn` is `(fn [digest] record-or-nil)` — injected, because this
+  namespace performs no IO and the caller's edge already has a way to read an
+  object.
+
+  -> a vector of records, genesis first, or `{:refused reason}`.
+
+  **The tip needs no signature.** A tip that is stale, missing, or planted by
+  whoever can write the location costs a resolution that FAILS or that lands
+  on an older key set; it cannot introduce a key, because every record is
+  still checked by `verify-log` against the commitment in its predecessor and
+  against the hash link. This is the argument the packed block plane makes
+  for its unsigned tip object (root ADR-2608170300): what the pointer claims
+  is re-checked downstream, so the pointer is a hint rather than an
+  authority.
+
+  What a hostile tip CAN do is withhold — serve an old tip and hide a
+  rotation. That is a liveness failure, not an authority one, and a caller
+  that cares compares `:seq` against what it last saw."
+  ([tip fetch-fn] (resolve-log tip fetch-fn default-max-chain))
+  ([tip fetch-fn max-chain]
+   (loop [digest tip acc () seen #{} n 0]
+     (cond
+       (nil? digest) (if (seq acc) (vec acc) {:refused :empty-log})
+       (contains? seen digest) {:refused :cycle :digest digest :at n}
+       (> n max-chain) {:refused :chain-too-long :max max-chain}
+       :else
+       (if-let [r (fetch-fn digest)]
+         (recur (get r "prev") (conj acc (assoc r "record-digest" digest))
+                (conj seen digest) (inc n))
+         {:refused :record-not-found :digest digest :at n})))))

@@ -282,6 +282,23 @@ publishing location can withhold records or serve old ones; they cannot
 introduce a key nobody committed to. `did:webvh` can still be the transport —
 it just is not the authority.
 
+Publishing is `publish` (records are immutable and content-addressed, plus
+one tip naming the newest) and reading is `resolve-log` (walk back from the
+tip to genesis, then verify forward). **The tip needs no signature**, for the
+argument the packed block plane makes for its own unsigned tip
+(root ADR-2608170300): a planted tip resolves, and then fails verification,
+because every record is still checked against its predecessor's commitment
+and against the hash link. What a hostile tip *can* do is withhold — serve an
+old tip and hide a rotation — which is a liveness failure, not an authority
+one, and a caller that cares compares `:seq` against what it last saw. There
+is a test for the planted tip that asserts both halves: it resolves, and it
+does not verify.
+
+The walk is bounded (a tip comes from a host that may be hostile, so `prev`
+is an unbounded pointer chase it controls), cycles are refused, and a
+withheld record is refused rather than leaving the reader with a shorter,
+still-verifying chain.
+
 Two failures this shape already cost the fleet once (`signed-head`, 2026-08-04)
 are tests here: a record must **name what it is the key for** (or a host
 answers subject B with subject A's genuinely-signed record and nothing was

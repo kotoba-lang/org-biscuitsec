@@ -2,6 +2,7 @@
   "name": "@kotoba-lang/org-biscuitsec",
   "private": true,
   "scripts": {
-    "test:nbb": "nbb --classpath src:test:../authority/src run-nbb-tests.cljs"
+    "test:nbb": "nbb --classpath src:test:../authority/src run-nbb-tests.cljs",
+    "bench:keydist": "nbb --classpath src:bench bench/keydist.cljs"
   }
 }

@@ -247,6 +247,47 @@ was allowed to decide: `data ‖ alg(LE32) ‖ next_key` verifies, and there is 
 test asserting the **other order fails**, because a positive result nothing
 could have failed proves nothing.
 
+## Where the root key comes from, computed
+
+Verification needs one root public key, which moves the problem one step
+out: the edge has to learn *which* key, and a key baked into a bundle cannot
+rotate while a key fetched from a mutable place can be swapped silently.
+
+`npm run bench:keydist` computes the trade rather than asserting it. The unit
+is fetches, because on an edge a fetch is a round trip and everything else is
+noise beside it (1M verifications/month, quarterly rotation, 400 cold starts
+a day):
+
+| option | fetches/mo | verifiable rotation | a compromised distribution point can |
+|---|---:|---|---|
+| baked into the bundle | **0** | no | swap the key for everyone, silently |
+| KV / mutable lookup | **360,000** | no | swap the key for everyone, silently |
+| `did:web` | 12,000 | no | swap the key, silently |
+| `did:webvh` | 16,000 | **YES** | withhold or serve stale — **cannot introduce a key** |
+| **signed rotation log** | **12,000** | **YES** | withhold or serve stale — **cannot introduce a key** |
+
+The mutable lookup is thirty times the cost of the alternatives **and**
+unverifiable, which is the combination worth naming. The two verifiable
+options cost the same order; one adds DNS and HTTPS to the auth path
+(root ADR-2608039000 spent effort removing exactly that) and the other adds
+nothing new — because it is the shape `kotobase.storage.signed-head`, IPNS v2
+and `kototama.component-authority` already are, and the shape a biscuit
+itself uses internally: **each record names the key that may sign the next
+one.**
+
+`biscuit.rootkey` is that log. A record commits to the **digest** of the key
+allowed to sign its successor, so a reader trusting record *n* can verify
+*n+1* without trusting the host it arrived from. An attacker who takes the
+publishing location can withhold records or serve old ones; they cannot
+introduce a key nobody committed to. `did:webvh` can still be the transport —
+it just is not the authority.
+
+Two failures this shape already cost the fleet once (`signed-head`, 2026-08-04)
+are tests here: a record must **name what it is the key for** (or a host
+answers subject B with subject A's genuinely-signed record and nothing was
+forged), and the signer must be constrained by something **outside** the
+record (or the check is *somebody signed this*, which any keypair satisfies).
+
 ## Verification
 
 `clojure -M:test` and `npm run test:nbb` — **49 tests, 120 assertions**, both

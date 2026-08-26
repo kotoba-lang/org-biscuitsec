@@ -192,11 +192,11 @@ with two scopes reach nothing: safe, and wrong.
 
 ## What it refuses, by name
 
-- **Writing the wire format.** `biscuit.wire` **reads** biscuit v3 protobuf
-  and verifies its signature chain against `biscuit-auth`'s own samples (see
-  below). It does not write one: a writer whose output nothing external has
-  accepted is the claim `org-apache-parquet` learned to distrust from inside
-  its own passing suite.
+- **Silently weakening a token while writing it.** `biscuit.wire` writes a
+  facts-only Biscuit v3 authority block and refuses unsupported terms. Rules,
+  checks and expressions are not accepted by that writer until the decoder
+  can enforce them too; dropping a restriction would mint more authority
+  than the issuer requested.
 - **Expressions** (`Op` / `OpUnary` / `OpBinary` / `OpClosure`). Rules and
   checks are counted, not decoded. This is where a partial decoder would do
   real damage — an operator it silently dropped is a *check that no longer
@@ -222,7 +222,7 @@ perfectly consistent** — a well-formed biscuit in every respect. It verifies
 under its own root and is worthless under ours, and the only thing separating
 the two is the root key the edge was given.
 
-## It reads a token `biscuit-auth` minted
+## It reads and writes tokens across the `biscuit-auth` boundary
 
 Every other suite here checks this library against itself. `biscuit.wire`
 checks it against the reference implementation, using that project's own
@@ -238,6 +238,12 @@ checks it against the reference implementation, using that project's own
 
 and the three negative samples — a different root key, an altered signature
 byte, reordered blocks — are all refused.
+
+The reverse direction is checked too: `encode-authority-token` mints a v3
+protobuf token, and the official Rust `biscuit-auth` CLI opens it, prints its
+`scope` / `before` / `holder` facts, and reports a successful public-key
+check. This is deliberately stronger than the in-repo writer→reader round
+trip, which remains in the portable JVM and nbb suites as a regression test.
 
 **The signature byte order was decided by the sample, not by me.** The spec's
 v0 section lists the payload parts as data, next key, algorithm; the v1

@@ -4,10 +4,10 @@
 
   Until this existed, `org-biscuitsec` held the model and could not read a
   byte another implementation produced. That is a real limit and the README
-  said so; this is the half that removes it, and it is deliberately the
-  *reading* half. A writer whose output nothing external has accepted is the
-  claim `org-apache-parquet` learned to distrust from inside its own passing
-  suite.
+  said so; the reader removed that limit first. The facts-only authority
+  writer now emits the same format and is accepted by the official
+  `biscuit-auth` Rust verifier. That external acceptance is the evidence a
+  writer needs; an in-repo round trip alone is not an interoperability test.
 
   ## What is implemented, and what is refused by name
 
@@ -19,7 +19,7 @@
   | rules, checks | counted, not decoded |
   | **expressions** (`Op`/`OpUnary`/`OpBinary`/`OpClosure`) | **refused by name** |
   | third-party (`externalSignature`) blocks | **refused by name** |
-  | writing tokens | **not implemented** |
+  | facts-only authority token writer | **yes** |
 
   An expression is where a partial decoder would do real damage: an operator
   it silently dropped is a *check that no longer restricts*, which reads as a
@@ -81,6 +81,120 @@
    4 {:name :date :type :uint64}
    5 {:name :bytes :type :bytes}
    6 {:name :bool :type :bool}})
+
+(def ^:private proof-schema
+  {1 {:name :next-secret :type :bytes}
+   2 {:name :final-signature :type :bytes}})
+
+(declare signed-payload)
+
+(defn- require-size [label n xs]
+  (let [v (vec xs)]
+    (when-not (= n (count v))
+      (throw (ex-info (str label " must be exactly " n " bytes")
+                      {:type :biscuit/invalid-key-material
+                       :field label :expected n :actual (count v)})))
+    v))
+
+(defn- ordered-distinct [xs]
+  (:out (reduce (fn [{:keys [seen] :as acc} x]
+                  (if (contains? seen x)
+                    acc
+                    {:seen (conj seen x) :out (conj (:out acc) x)}))
+                {:seen #{} :out []}
+                xs)))
+
+(defn- fact-symbols [facts]
+  (ordered-distinct
+   (mapcat (fn [fact]
+             (when-not (and (sequential? fact) (seq fact))
+               (throw (ex-info "a biscuit fact must be a non-empty sequence"
+                               {:type :biscuit/invalid-fact :fact fact})))
+             (let [[head & terms] fact]
+               (when-not (or (symbol? head) (string? head))
+                 (throw (ex-info "a biscuit fact predicate must be a symbol or string"
+                                 {:type :biscuit/invalid-fact :fact fact})))
+               (concat [(name head)] (keep #(when (string? %) %) terms))))
+           facts)))
+
+(defn- symbol-index [symbols s]
+  (or (first (keep-indexed #(when (= s %2) %1) default-symbols))
+      (when-let [i (first (keep-indexed #(when (= s %2) %1) symbols))]
+        (+ 1024 i))
+      (throw (ex-info "symbol was not allocated in this block"
+                      {:type :biscuit/missing-symbol :symbol s}))))
+
+(defn- encode-term [symbols x]
+  (cond
+    (string? x) (pb/encode term-schema {:string (symbol-index symbols x)})
+    (integer? x) (pb/encode term-schema {:integer x})
+    (boolean? x) (pb/encode term-schema {:bool x})
+    (and (vector? x) (= :date (first x)) (= 2 (count x)))
+    (pb/encode term-schema {:date (second x)})
+    (and (vector? x) (= :bytes (first x)) (= 2 (count x)))
+    (pb/encode term-schema {:bytes (vec (second x))})
+    :else
+    (throw (ex-info "unsupported fact term in the facts-only writer"
+                    {:type :biscuit/unsupported-term :term x}))))
+
+(defn encode-authority-block
+  "Encode a Biscuit v3 authority block containing facts only.
+
+  Facts use the model shape already consumed by this library, for example
+  `'[[scope \"kotoba://graph/acme\"] [before \"2026-09-01T00:00:00Z\"]]`.
+  Predicate heads are symbols or strings. Terms may be strings, integers,
+  booleans, `[:date unix-seconds]`, or `[:bytes octets]`.
+
+  Rules, checks, expressions and third-party blocks are deliberately not
+  accepted here. An issuer needing those must grow the writer and the decoder
+  together; silently omitting a restriction would mint more authority than
+  the caller requested."
+  [facts]
+  (let [facts (vec facts)
+        symbols (fact-symbols facts)
+        encoded-facts
+        (mapv (fn [[head & terms]]
+                (pb/encode fact-schema
+                           {:predicate
+                            (pb/encode predicate-schema
+                                       {:name (symbol-index symbols (name head))
+                                        :terms (mapv #(encode-term symbols %) terms)})}))
+              facts)]
+    (pb/encode block-schema {:symbols symbols :version 3 :facts encoded-facts})))
+
+(defn encode-authority-token
+  "Mint an attenuable Biscuit v3 token with one facts-only authority block.
+
+  `sign-fn` is `(fn [root-private-key payload-bytes] signature-bytes)`.
+  Key derivation and randomness stay with the host: the caller supplies a
+  fresh 32-byte `next-secret` and its matching 32-byte `next-public-key`.
+  Keeping crypto injected is the same boundary as `verify`: Workers, the JVM,
+  and an HSM can all use the same canonical writer without this namespace
+  pretending to own their key custody.
+
+  The returned value is raw token octets. Its textual HTTP form is URL-safe
+  base64, as required by the Biscuit specification."
+  [{:keys [root-key-id facts root-private-key next-secret next-public-key sign-fn]}]
+  (when-not sign-fn
+    (throw (ex-info "a Biscuit writer requires sign-fn"
+                    {:type :biscuit/no-signer})))
+  (when (and (some? root-key-id)
+             (or (neg? root-key-id) (> root-key-id 4294967295)))
+    (throw (ex-info "root-key-id must be an unsigned 32-bit integer"
+                    {:type :biscuit/invalid-root-key-id :root-key-id root-key-id})))
+  (let [next-secret (require-size "next-secret" 32 next-secret)
+        next-public-key (require-size "next-public-key" 32 next-public-key)
+        block (encode-authority-block facts)
+        payload (signed-payload {:version 0 :block block :next-key-alg 0
+                                 :next-key next-public-key :order :alg-first})
+        signature (require-size "signature" 64 (sign-fn root-private-key payload))
+        public-key (pb/encode public-key-schema {:algorithm 0 :key next-public-key})
+        authority (pb/encode signed-block-schema
+                             {:block block :next-key public-key :signature signature})
+        proof (pb/encode proof-schema {:next-secret next-secret})]
+    (pb/encode biscuit-schema
+               (cond-> {:authority authority :proof proof}
+                 (some? root-key-id) (assoc :root-key-id root-key-id)))))
 
 (defn- le32 [n]
   [(bit-and n 0xff) (bit-and (bit-shift-right n 8) 0xff)
@@ -159,6 +273,7 @@
   caller can inspect a token it does not trust without running anything."
   [bs]
   (let [t (pb/decode biscuit-schema bs)
+        proof (pb/decode proof-schema (:proof t))
         signed (fn [b] (let [sb (pb/decode signed-block-schema b)
                              pk (pb/decode public-key-schema (:next-key sb))]
                          (when (:external-signature sb)
@@ -170,6 +285,10 @@
                           :signature (vec (:signature sb))
                           :version (:version sb)}))]
     {:root-key-id (:root-key-id t)
+     :proof (cond
+              (:next-secret proof) {:next-secret (vec (:next-secret proof))}
+              (:final-signature proof) {:final-signature (vec (:final-signature proof))}
+              :else nil)
      :blocks (into [(signed (:authority t))] (map signed) (:blocks t))}))
 
 (defn blocks-with-facts

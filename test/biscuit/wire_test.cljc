@@ -42,6 +42,44 @@
            (w/verify (w/decode-token (sample "test001_basic"))
                      root-public-key e/verify-bytes-fn)))))
 
+(deftest the-writer-mints-a-verifiable-v3-authority-token
+  (let [root (e/keypair (vec (range 32)))
+        next-seed (vec (range 32 64))
+        next-key (e/keypair next-seed)
+        facts '[[scope "kotoba://graph/acme"]
+                [scope "kotoba://tenant/did:plc:acme"]
+                [before "2026-09-01T00:00:00Z"]
+                [holder "did:key:zAlice"]
+                [active true]
+                [generation 7]]
+        bytes (w/encode-authority-token
+               {:root-key-id 9
+                :facts facts
+                :root-private-key (:private root)
+                :next-secret next-seed
+                :next-public-key (:public next-key)
+                :sign-fn e/sign-bytes-fn})
+        token (w/decode-token bytes)]
+    (is (= 9 (:root-key-id token)))
+    (is (= {:next-secret next-seed} (:proof token)))
+    (is (= {:ok? true :blocks 1}
+           (w/verify token (:public root) e/verify-bytes-fn)))
+    (is (= facts
+           (get-in (w/token->model token) [:biscuit/blocks 0 :block/facts])))))
+
+(deftest the-writer-refuses-to-silently-weaken-a-token
+  (testing "an unsupported term is rejected instead of omitted"
+    (is (thrown? #?(:clj Exception :cljs :default)
+                 (w/encode-authority-block '[[scope {:not "a term"}]]))))
+  (testing "key material is exact-size, so truncation cannot mint another key"
+    (is (thrown? #?(:clj Exception :cljs :default)
+                 (w/encode-authority-token
+                  {:facts '[[scope "kotoba://graph/acme"]]
+                   :root-private-key :opaque
+                   :next-secret (repeat 31 0)
+                   :next-public-key (repeat 32 0)
+                   :sign-fn (fn [_ _] (repeat 64 0))})))))
+
 (deftest the-v0-payload-byte-order-is-the-one-the-sample-verified
   (testing "the spec's two sections disagree; the sample decides, and the
             wrong order must FAIL or the right one proves nothing"

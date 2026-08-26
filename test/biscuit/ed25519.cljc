@@ -67,6 +67,17 @@
      :cljs (vec (js/Array.from
                  (nc/sign nil (js/Buffer.from (clj->js (utf8 payload))) private-key*)))))
 
+(defn sign-bytes-fn
+  "Sign a raw byte payload, in the shape `biscuit.wire/encode-authority-token`
+  injects. This must stay separate from `sign-fn`, whose payload is text."
+  [private-key* payload]
+  #?(:clj (let [s (doto (Signature/getInstance "Ed25519")
+                    (.initSign private-key*)
+                    (.update (byte-array (->signed-bytes payload))))]
+            (vec (map #(bit-and % 255) (.sign s))))
+     :cljs (vec (js/Array.from
+                 (nc/sign nil (js/Buffer.from (clj->js (vec payload))) private-key*)))))
+
 (defn verify-fn [public-key* payload signature]
   (try
     #?(:clj (let [s (doto (Signature/getInstance "Ed25519")

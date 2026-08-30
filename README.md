@@ -7,6 +7,32 @@ secret at all.**
 principal-to-principal delegation is written here, and every other capability
 format keeps a named, narrower role.
 
+## Kotoba effect join
+
+`biscuit.kotoba-logic/authorize` is the bounded five-origin guard used at an
+effect boundary:
+
+```text
+Amu static effect
+  AND VM concrete intent
+  AND attenuated Biscuit grant
+  AND local policy
+  AND current runtime world/availability
+  => concrete runtime capability
+```
+
+Amu facts arrive in a content-bound `:kotoba.compiler-facts/v1` envelope.
+Biscuit facts are first reduced to `grant:` facts by `biscuit.kotoba`; token
+facts and rules are then hidden from policy saturation, so a token cannot
+impersonate `amu:`, `policy:`, or `runtime:` provenance. Only the local
+authorizer's generated allow policy can produce a capability. Every outcome is
+receipted without embedding the bearer token.
+
+`biscuit.effective/authorize` remains the compatibility guard for the earlier
+three-term semantics. When handed semantics v2 it fails closed with
+`:logic-authorizer-required`; new hosts cannot accidentally skip Amu or runtime
+evidence by calling the legacy surface.
+
 Origin plane of [biscuitsec.org](https://www.biscuitsec.org) — the format is
 Biscuit's, so the repo is named for where it comes from, not for what it does
 here. This is a **clean-room decision core**, not a port.

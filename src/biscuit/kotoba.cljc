@@ -79,6 +79,8 @@
                                                 [k (set/intersection rs later)]))
                                             acc)))))
                        {} per-block)
+        authority-facts (get-in t [:biscuit/blocks 0 :block/facts])
+        holders (into #{} (keep (fn [[p v]] (when (= 'holder p) v))) authority-facts)
         befores (keep (fn [[p v]] (when (= 'before p) v))
                       (mapcat :block/facts blocks))
         expires (when (seq befores) (reduce (fn [a b] (if (neg? (compare a b)) a b)) befores))]
@@ -87,6 +89,7 @@
                              :grant/resources (vec (sort rs))
                              :grant/id (str "biscuit:" (hash [k (sort rs)]))}
                       expires (assoc :grant/expires expires))))
+     :grant/holder (when (= 1 (count holders)) (first holders))
      :grant/rejected @rejected}))
 
 (defn missing-grant?

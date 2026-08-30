@@ -107,6 +107,21 @@
          (:reason (call (token '[[cap "graph-read" "kotoba://graph/acme"]])
                         {:cap/resource "kotoba://graph/acme"})))))
 
+(deftest semantics-v2-cannot-fall-back-to-the-three-term-guard
+  (let [v2 (assoc-in semantics [:rules :effective-scope]
+                     :statically-possible-intersect-requested-intersect-delegated-intersect-local-policy-intersect-runtime-available)
+        t (token '[[cap "graph-read" "kotoba://graph/acme"]])
+        decision (eff/authorize
+                  {:semantics v2 :token t
+                   :root-public-key (:public root) :verify-fn k/verify-fn
+                   :requested {:cap/kind :graph-read
+                               :cap/resource "kotoba://graph/acme"}
+                   :local-policy {:policy/allow ["kotoba://graph/acme"]
+                                  :policy/forbid-wildcard true}
+                   :now "2026-08-19T00:00:00Z" :call "graph/read"})]
+    (is (= :logic-authorizer-required (:reason decision)))
+    (is (= :denied (get-in decision [:receipt :receipt/outcome])))))
+
 (deftest a-wildcard-cannot-become-effective-authority
   (let [t (token '[[cap "graph-read" "*"]])]
     (is (= :production-effective-wildcard

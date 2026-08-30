@@ -36,13 +36,19 @@
 
   `authorizer` is `{:facts [...] :rules [...] :policies [{:kind :allow|:deny
   :body [...]} ...]}` — the verifier's own knowledge, which is never in the
-  token.
+  token. `:policy-token-facts? false` keeps token facts and rules out of policy
+  saturation while still evaluating every token check in its scoped block.
+  This is required when an adapter projects verified token authority into a
+  narrower provenance such as `grant:`: a token must not impersonate trusted
+  compiler, local-policy, or runtime predicates. The default is true for the
+  ordinary Biscuit authorizer surface.
 
   Order is fixed and load-bearing: **verify, then checks, then policies.**
   Running policies first would let a token whose signature does not verify
   reach a rule that says `allow`."
-  [t {:keys [root-public-key verify-fn facts rules policies budget]
-      :or {budget d/default-budget}}]
+  [t {:keys [root-public-key verify-fn facts rules policies budget
+             policy-token-facts?]
+      :or {budget d/default-budget policy-token-facts? true}}]
   (let [v (token/verify t root-public-key verify-fn)]
     (if-not (:ok? v)
       {:allowed? false :reason (:reason v) :verified? false}
@@ -63,8 +69,12 @@
           ;; Policies see the authorizer's facts plus the WHOLE token's facts:
           ;; the service is deciding about the token as presented, and it is
           ;; the party that wrote these rules.
-          (let [all (into (vec facts) (mapcat :block/facts (:biscuit/blocks t)))
-                all-rules (into (vec rules) (mapcat :block/rules (:biscuit/blocks t)))
+          (let [all (into (vec facts)
+                          (when policy-token-facts?
+                            (mapcat :block/facts (:biscuit/blocks t))))
+                all-rules (into (vec rules)
+                                (when policy-token-facts?
+                                  (mapcat :block/rules (:biscuit/blocks t))))
                 sat (d/saturate all all-rules budget)]
             (if (:refused sat)
               {:allowed? false :reason (:refused sat) :verified? true}

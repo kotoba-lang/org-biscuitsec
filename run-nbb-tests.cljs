@@ -5,11 +5,12 @@
             [biscuit.authority-test]
             [biscuit.kotoba-test]
             [biscuit.effective-test]
+            [biscuit.kotoba-logic-test]
             [biscuit.real-crypto-test]
             [biscuit.wire-test]
             [biscuit.rootkey-test]))
 
-(def namespaces '[biscuit.datalog-test biscuit.token-test biscuit.authority-test biscuit.kotoba-test biscuit.effective-test biscuit.real-crypto-test biscuit.wire-test biscuit.rootkey-test])
+(def namespaces '[biscuit.datalog-test biscuit.token-test biscuit.authority-test biscuit.kotoba-test biscuit.effective-test biscuit.kotoba-logic-test biscuit.real-crypto-test biscuit.wire-test biscuit.rootkey-test])
 
 (let [{:keys [fail error test]} (apply t/run-tests namespaces)]
   (when (zero? test) (println "no tests ran") (js/process.exit 2))

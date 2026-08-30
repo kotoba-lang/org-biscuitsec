@@ -24,6 +24,12 @@
     (testing "grants, never :cap/* — the intersection step is not optional"
       (is (nil? (:cap/kind g))))))
 
+(deftest the-authority-block-binds-the-holder
+  (let [d (bk/->delegated (tok '[[holder "did:key:zAlice"]
+                                 [cap "graph-read" "kotoba://graph/acme"]])
+                          kinds)]
+    (is (= "did:key:zAlice" (:grant/holder d)))))
+
 (deftest a-kind-outside-the-closed-set-is-rejected-not-ignored
   (let [d (bk/->delegated (tok '[[cap "graph-read" "kotoba://graph/acme"]
                                  [cap "kernel/format-disk" "/dev/sda"]])

@@ -69,6 +69,13 @@
       (not (:ok? v))
       (deny (:reason v))
 
+      ;; Language semantics v2 adds trusted Amu and runtime-availability
+      ;; origins. This legacy three-term entry point cannot prove either and
+      ;; must not silently implement a weaker reading of the newer contract.
+      (= :statically-possible-intersect-requested-intersect-delegated-intersect-local-policy-intersect-runtime-available
+         (:effective-scope rules))
+      (deny :logic-authorizer-required)
+
       ;; :plain-resource-is-not-authority — a request naming a resource with
       ;; no kind is not a weaker request, it is not a request.
       (and (:plain-resource-is-not-authority rules) (nil? kind))

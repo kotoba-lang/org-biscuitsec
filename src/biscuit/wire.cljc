@@ -47,7 +47,9 @@
   and produce plausible verifications, both are expressible and
   `biscuit-auth`'s own `test001_basic.bc` was allowed to decide which one a
   real token uses. The test is what keeps that honest."
-  (:require [protobuf.wire :as pb]))
+  (:require [biscuit.expression :as x]
+            [clojure.string :as str]
+            [protobuf.wire :as pb]))
 
 (def version "biscuit/wire-v3")
 
@@ -153,6 +155,32 @@
                (concat [(name head)] (keep #(when (string? %) %) terms))))
            facts)))
 
+(defn- check-symbols
+  "Every symbol a check needs: its body predicates, their string terms, and the
+  bare names of its variables. Missed names become `symbol was not allocated`
+  at encode time, which is the right failure -- a token that encoded with a
+  missing symbol would decode to a different check than it was written with."
+  [checks]
+  (ordered-distinct
+   (mapcat (fn [{:keys [body expressions]}]
+             (concat
+              (mapcat (fn [[head & terms]]
+                        (concat [(name head)]
+                                (keep #(when (string? %) %) terms)
+                                (keep #(when (and (symbol? %) (str/starts-with? (name %) "?"))
+                                         (subs (name %) 1))
+                                      terms)))
+                      body)
+              (mapcat (fn [ops]
+                        (keep (fn [[kind arg]]
+                                (when (= :value kind)
+                                  (cond (string? arg) arg
+                                        (and (symbol? arg) (str/starts-with? (name arg) "?"))
+                                        (subs (name arg) 1))))
+                              ops))
+                      expressions)))
+           checks)))
+
 (defn- symbol-index [symbols s]
   (or (first (keep-indexed #(when (= s %2) %1) default-symbols))
       (when-let [i (first (keep-indexed #(when (= s %2) %1) symbols))]
@@ -169,9 +197,75 @@
     (pb/encode term-schema {:date (second x)})
     (and (vector? x) (= :bytes (first x)) (= 2 (count x)))
     (pb/encode term-schema {:bytes (vec (second x))})
+    ;; `?t` is a variable. The table holds the BARE name, because the decoder
+    ;; puts the `?` back -- storing it with the mark would make every variable
+    ;; a different symbol from the one a reader looks up.
+    (and (symbol? x) (str/starts-with? (name x) "?"))
+    (pb/encode term-schema {:variable (symbol-index symbols (subs (name x) 1))})
     :else
     (throw (ex-info "unsupported fact term in the facts-only writer"
                     {:type :biscuit/unsupported-term :term x}))))
+
+(defn- evaluated-kind
+  "The op kind as the wire carries it -- the spec's enum NUMBER, which is also
+  what the decoder produces, so an op list round-trips unchanged.
+
+  A keyword is accepted too, for a caller writing a check by hand, but the
+  number is the representation: keeping the writer and the reader on the same
+  shape is what lets a test decode what it just encoded and compare."
+  [table arg]
+  (cond
+    (and (number? arg) (contains? table arg)) arg
+    (keyword? arg) (first (keep (fn [[n k]] (when (= k arg) n)) table))
+    :else nil))
+
+(defn- encode-expression
+  "An op list -> Expression bytes.
+
+  Refuses any operator outside `biscuit.expression`'s subset, and that is the
+  point of encoding through it rather than through a table of its own: a writer
+  that could mint what this repo cannot evaluate would hand somebody a token
+  that is refused on arrival. The subset lives in one place, and both
+  directions read it."
+  [symbols ops]
+  (pb/encode
+   expression-schema
+   {:ops (mapv (fn [[kind arg]]
+                 (case kind
+                   :value (pb/encode op-schema {:value (encode-term symbols arg)})
+                   :unary (if-let [k (evaluated-kind x/unary-ops arg)]
+                            (pb/encode op-schema
+                                       {:unary (pb/encode op-unary-schema {:kind k})})
+                            (throw (ex-info "unary operator outside the evaluated subset"
+                                            {:type :biscuit/unsupported-operator :op arg})))
+                   :binary (if-let [k (evaluated-kind x/binary-ops arg)]
+                             (pb/encode op-schema
+                                        {:binary (pb/encode op-binary-schema {:kind k})})
+                             (throw (ex-info "binary operator outside the evaluated subset"
+                                             {:type :biscuit/unsupported-operator :op arg})))
+                   (throw (ex-info "unknown op" {:type :biscuit/unknown-op :op kind}))))
+               ops)}))
+
+(defn- encode-check
+  "One `{:body [...] :expressions [...]}` -> Check bytes.
+
+  The rule head is `query()` with no terms, which is what biscuit-auth's own
+  samples carry -- measured on test001_basic rather than chosen. Kind is left
+  at the default One, the only quantifier this repo evaluates."
+  [symbols {:keys [body expressions]}]
+  (pb/encode
+   check-schema
+   {:queries [(pb/encode
+               rule-schema
+               (cond-> {:head (pb/encode predicate-schema
+                                         {:name (symbol-index symbols "query") :terms []})
+                        :body (mapv (fn [[head & terms]]
+                                      (pb/encode predicate-schema
+                                                 {:name (symbol-index symbols (name head))
+                                                  :terms (mapv #(encode-term symbols %) terms)}))
+                                    body)}
+                 (seq expressions)
+                 (assoc :expressions (mapv #(encode-expression symbols %) expressions))))]}))
 
 (defn- encode-facts-block
   "Facts -> block bytes, given every symbol the EARLIER blocks already defined.
@@ -183,20 +277,26 @@
   block 0 and point every term at the wrong entry -- a token that decodes to
   different facts than it was written with, which is worse than one that
   fails to decode."
-  [facts prior-symbols]
-  (let [facts (vec facts)
-        prior (vec prior-symbols)
-        own (vec (remove (set prior) (fact-symbols facts)))
-        table (into prior own)
-        encoded-facts
-        (mapv (fn [[head & terms]]
-                (pb/encode fact-schema
-                           {:predicate
-                            (pb/encode predicate-schema
-                                       {:name (symbol-index table (name head))
-                                        :terms (mapv #(encode-term table %) terms)})}))
-              facts)]
-    (pb/encode block-schema {:symbols own :version 3 :facts encoded-facts})))
+  ([facts prior-symbols] (encode-facts-block facts nil prior-symbols))
+  ([facts checks prior-symbols]
+   (let [facts (vec facts)
+         checks (vec checks)
+         prior (vec prior-symbols)
+         own (vec (remove (set prior)
+                          (ordered-distinct (concat (fact-symbols facts)
+                                                    (check-symbols checks)))))
+         table (into prior own)
+         encoded-facts
+         (mapv (fn [[head & terms]]
+                 (pb/encode fact-schema
+                            {:predicate
+                             (pb/encode predicate-schema
+                                        {:name (symbol-index table (name head))
+                                         :terms (mapv #(encode-term table %) terms)})}))
+               facts)]
+     (pb/encode block-schema
+                (cond-> {:symbols own :version 3 :facts encoded-facts}
+                  (seq checks) (assoc :checks (mapv #(encode-check table %) checks)))))))
 
 (defn encode-authority-block
   "Encode a Biscuit v3 authority block containing facts only.
@@ -456,7 +556,7 @@
   Returns raw token octets. A sealed token is refused rather than
   approximated -- sealing is the statement that no further block may be
   added."
-  [token-bytes {:keys [facts proof-secret next-secret next-public-key sign-fn]}]
+  [token-bytes {:keys [facts checks proof-secret next-secret next-public-key sign-fn]}]
   (when-not sign-fn
     (throw (ex-info "a Biscuit writer requires sign-fn" {:type :biscuit/no-signer})))
   (let [t (decode-token token-bytes)
@@ -470,7 +570,7 @@
     (let [next-secret (require-size "next-secret" 32 next-secret)
           next-public-key (require-size "next-public-key" 32 next-public-key)
           prior (:symbols (last (blocks-with-facts t)))
-          block (encode-facts-block facts prior)
+          block (encode-facts-block facts checks prior)
           payload (signed-payload {:version 0 :block block :next-key-alg 0
                                    :next-key next-public-key :order :alg-first})
           signature (require-size "signature" 64 (sign-fn secret payload))

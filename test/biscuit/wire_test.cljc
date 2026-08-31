@@ -6,7 +6,8 @@
   that supports the word *interoperable* — the standard
   `org-apache-parquet` arrived at after two defects passed every in-repo
   test."
-  (:require [biscuit.ed25519 :as e]
+  (:require [biscuit.authorizer :as az]
+            [biscuit.ed25519 :as e]
             [biscuit.kotoba :as bk]
             [biscuit.wire :as w]
             [clojure.test :refer [deftest is testing]]
@@ -353,3 +354,59 @@
 ;; asserted here because this library has no sealer to build one with. It is
 ;; a refusal written from the spec, not a measured one, and saying so is
 ;; cheaper than a test that constructs a seal this codebase would not accept.
+
+;; ── attenuating with a CHECK, not only with facts ───────────────────────────
+
+(deftest a-holder-can-add-a-bound-the-issuer-never-wrote
+  (testing "facts で scope は狭められたが、`T まで` `N まで` は書けなかった。
+            それが委譲の言いたいことの半分"
+    (let [root (e/keypair (vec (range 32)))
+          k1 (e/keypair (vec (range 32 64)))
+          holder (e/keypair (vec (map #(+ 70 %) (range 32))))
+          minted (w/encode-authority-token
+                  {:facts '[[scope "kotoba://graph/acme"]]
+                   :root-private-key (:private root)
+                   :next-secret (vec (range 32 64))
+                   :next-public-key (:public k1)
+                   :sign-fn e/sign-bytes-fn})
+          ;; check if time($t), $t < 200
+          bounded (w/append-block
+                   minted
+                   {:checks [{:body '[[time ?t]]
+                              :expressions [[[:value '?t] [:value 200] [:binary 0]]]}]
+                    :next-secret (vec (map #(+ 70 %) (range 32)))
+                    :next-public-key (:public holder)
+                    :sign-fn raw-seed-sign})
+          t (w/decode-token bounded)
+          m (w/token->model t)]
+      (testing "署名の連鎖は保たれる —— 発行者の鍵を一切使っていない"
+        (is (:ok? (w/verify t (:public root) e/verify-bytes-fn))))
+      (testing "追記した block が check を運んでいる"
+        (is (= 2 (count (:biscuit/blocks m))))
+        (let [c (first (:block/checks (second (:biscuit/blocks m))))]
+          (is (= '[[time ?t]] (:body c)))
+          (is (= [[[:value '?t] [:value 200] [:binary 0]]] (:expressions c)))))
+      (testing "**その境界が実際に効く** —— 発行者は scope しか書いていない"
+        (is (true? (:allowed? (az/run-checks m {:ok? true} {:facts '[[time 100]]}))))
+        (is (= :check-failed (:reason (az/run-checks m {:ok? true} {:facts '[[time 300]]}))))))))
+
+(deftest a-writer-refuses-to-mint-what-this-repo-cannot-evaluate
+  (testing "評価できない token を発行したら、受け取った側で拒否されるだけ。
+            部分集合の定義は 1 箇所にあり、両方向がそれを読む"
+    (let [root (e/keypair (vec (range 32)))
+          k1 (e/keypair (vec (range 32 64)))
+          minted (w/encode-authority-token
+                  {:facts '[[scope "kotoba://graph/acme"]]
+                   :root-private-key (:private root)
+                   :next-secret (vec (range 32 64))
+                   :next-public-key (:public k1)
+                   :sign-fn e/sign-bytes-fn})]
+      (is (thrown? #?(:clj Exception :cljs :default)
+                   (w/append-block
+                    minted
+                    {:checks [{:body '[[time ?t]]
+                               ;; 8 = Regex, 部分集合の外
+                               :expressions [[[:value '?t] [:value "x"] [:binary 8]]]}]
+                     :next-secret (vec (map #(+ 70 %) (range 32)))
+                     :next-public-key (:public (e/keypair (vec (map #(+ 70 %) (range 32)))))
+                     :sign-fn raw-seed-sign}))))))

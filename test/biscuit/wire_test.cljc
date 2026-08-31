@@ -7,6 +7,7 @@
   `org-apache-parquet` arrived at after two defects passed every in-repo
   test."
   (:require [biscuit.ed25519 :as e]
+            [biscuit.kotoba :as bk]
             [biscuit.wire :as w]
             [clojure.test :refer [deftest is testing]]
             [protobuf.wire :as pb]
@@ -223,3 +224,118 @@
       (is (= 0 (:check-count d)))
       (is (= [] (:checks d)))
       (is (nil? (:checks-refused d))))))
+
+(defn- raw-seed-sign
+  "Sign with a raw 32-byte seed rather than a platform key handle.
+
+  `e/sign-bytes-fn` takes a node KeyObject; a Worker's signer (noble) takes
+  raw bytes, and so does the proof secret a token CARRIES. Both shapes are
+  legitimate — `sign-fn` is injected precisely so the library never decides
+  what a private key is — and the difference is worth exercising, because the
+  default `append-block` path hands the signer the token's raw secret."
+  [seed payload]
+  (e/sign-bytes-fn (:private (e/keypair (vec seed))) payload))
+
+;; ── attenuating a wire token ────────────────────────────────────────────────
+
+(deftest a-holder-attenuates-with-no-key-of-the-issuers
+  (testing "the operation Biscuit is chosen for, done end to end in this library"
+    ;; Until 2026-08-31 this library could READ an attenuated wire token and
+    ;; not WRITE one, so every multi-block case was hand-built and the claim
+    ;; that a holder could narrow a token we minted rested on the format.
+    (let [root (e/keypair (vec (range 32)))
+          k1 (e/keypair (vec (range 32 64)))
+          holder (e/keypair (vec (map #(+ 70 %) (range 32))))
+          minted (w/encode-authority-token
+                  {:facts '[[cap "graph-read" "kotoba://graph/hyakka/*"]
+                            [before "2099-01-01T00:00:00Z"]]
+                   :root-private-key (:private root)
+                   :next-secret (vec (range 32 64))
+                   :next-public-key (:public k1)
+                   :sign-fn e/sign-bytes-fn})
+          ;; the holder signs with the secret the TOKEN carries, and names a
+          ;; successor key the issuer has never seen
+          narrowed (w/append-block
+                    minted
+                    ;; no :proof-secret — it uses the one the TOKEN carries,
+                    ;; which is the whole claim: the holder needs nothing of
+                    ;; ours to narrow what we minted
+                    {:facts '[[cap "graph-read" "kotoba://graph/hyakka/koukyou-chotatsu"]]
+                     :next-secret (vec (map #(+ 70 %) (range 32)))
+                     :next-public-key (:public holder)
+                     :sign-fn raw-seed-sign})
+          t (w/decode-token narrowed)]
+      (is (= 2 (count (:blocks t))) "authority plus one")
+      (is (:ok? (w/verify t (:public root) e/verify-bytes-fn))
+          "and it still verifies against the ROOT public key alone")
+      (testing "the second block's facts survive the shared symbol table"
+        ;; indices count from 1024 across the cumulative table while a block
+        ;; carries only what it adds, so encoding block 1 as if it were an
+        ;; authority block would decode to different facts than were written
+        (let [m (w/token->model t)
+              b1 (get-in m [:biscuit/blocks 1 :block/facts])]
+          (is (= '[[cap "graph-read" "kotoba://graph/hyakka/koukyou-chotatsu"]] b1))))
+      (testing "and the fold narrows to what the holder kept"
+        (let [d (bk/->delegated (w/token->model t) #{:graph-read})]
+          (is (= ["kotoba://graph/hyakka/koukyou-chotatsu"]
+                 (:grant/resources (first (:grants d)))))
+          (is (= "2099-01-01T00:00:00Z" (:grant/expires (first (:grants d))))
+              "the bound from block 0 still binds"))))))
+
+(deftest an-attenuated-token-cannot-widen-and-cannot-be-rerooted
+  (let [root (e/keypair (vec (range 32)))
+        attacker (e/keypair (vec (map #(+ 100 %) (range 32))))
+        k1 (e/keypair (vec (range 32 64)))
+        minted (w/encode-authority-token
+                {:facts '[[cap "graph-read" "kotoba://graph/hyakka/koukyou-chotatsu"]]
+                 :root-private-key (:private root)
+                 :next-secret (vec (range 32 64))
+                 :next-public-key (:public k1)
+                 :sign-fn e/sign-bytes-fn})
+        widened (w/append-block
+                 minted {:facts '[[cap "graph-read" "kotoba://graph/hyakka/*"]]
+                         :next-secret (vec (map #(+ 100 %) (range 32)))
+                         :next-public-key (:public attacker)
+                         :sign-fn raw-seed-sign})
+        t (w/decode-token widened)]
+    (is (:ok? (w/verify t (:public root) e/verify-bytes-fn))
+        "appending is allowed to anyone; it is what the block SAYS that cannot widen")
+    (is (= ["kotoba://graph/hyakka/koukyou-chotatsu"]
+           (:grant/resources (first (:grants (bk/->delegated (w/token->model t) #{:graph-read})))))
+        "asking for the namespace in a later block confers nothing")
+    (testing "and none of it verifies under a root that did not mint it"
+      (is (false? (:ok? (w/verify t (:public attacker) e/verify-bytes-fn)))))))
+
+(deftest the-writer-refuses-rather-than-signing-with-nothing
+  (testing "the two ways there is no key to sign with"
+    (let [root (e/keypair (vec (range 32)))
+          k1 (e/keypair (vec (range 32 64)))
+          minted (w/encode-authority-token
+                  {:facts '[[cap "graph-read" "kotoba://graph/hyakka/*"]]
+                   :root-private-key (:private root)
+                   :next-secret (vec (range 32 64))
+                   :next-public-key (:public k1)
+                   :sign-fn e/sign-bytes-fn})]
+      (is (thrown? #?(:clj Exception :cljs :default)
+                   (w/append-block minted {:facts '[[cap "graph-read" "x://y"]]
+                                           :next-secret (vec (range 32))
+                                           :next-public-key (vec (range 32))}))
+          "no sign-fn")
+      (is (thrown? #?(:clj Exception :cljs :default)
+                   (w/append-block minted {:facts '[[cap "graph-read" "x://y"]]
+                                           :next-secret (vec (range 8))
+                                           :next-public-key (vec (range 32))
+                                           :sign-fn raw-seed-sign}))
+          "a next-secret that is not 32 bytes -- key material is size-checked
+           before anything is signed, not after")
+      (testing "and the ordinary case still works, so the refusals above are
+                not a writer that refuses everything"
+        (is (some? (w/append-block minted {:facts '[[cap "graph-read" "kotoba://graph/hyakka/isic"]]
+                                           :next-secret (vec (range 32))
+                                           :next-public-key (:public (e/keypair (vec (range 32))))
+                                           :sign-fn raw-seed-sign})))))))
+
+;; NOTE: `append-block` also refuses a SEALED token, and that branch is not
+;; asserted here because this library has no sealer to build one with. It is
+;; a refusal written from the spec, not a measured one, and saying so is
+;; cheaper than a test that constructs a seal this codebase would not accept.

@@ -53,3 +53,34 @@
                          :next-public-key (:public k1)
                          :root-private-key (:private root) :sign-fn k/sign-fn})]
     (is (empty? (:grant/scopes (ba/->grant t base))))))
+
+;; ── reading what a token grants on its own ──────────────────────────────────
+
+(deftest a-root-verifier-can-read-a-tokens-own-scope
+  (testing "この格子に top は無く、`{}` を base に渡すと空の antichain との
+            meet で必ず何も残らない。1-arity はそこを迂回するのではなく、
+            token を token 自身に対して畳む"
+    (let [t {:biscuit/blocks [{:block/facts '[[scope "kotoba://graph/acme"]]}]}]
+      (is (= #{["kotoba" "graph" "acme"]} (:grant/scopes (ba/->grant t))))
+      (is (= #{} (:grant/scopes (ba/->grant t {})))
+          "2-arity に {} を渡すのは『無制約』ではなく『何にも届かない』"))))
+
+(deftest later-blocks-still-only-narrow-without-a-base
+  (testing "1-arity でも attenuation の単調性は変わらない"
+    (let [t {:biscuit/blocks
+             [{:block/facts '[[scope "kotoba://graph/acme"] [scope "kotoba://graph/beta"]]}
+              {:block/facts '[[scope "kotoba://graph/acme"]]}]}]
+      (is (= #{["kotoba" "graph" "acme"]} (:grant/scopes (ba/->grant t)))))))
+
+(deftest a-token-with-no-scope-facts-grants-nothing
+  (testing "空を『全部』と読まない —— ここが逆だったら token 無しが最強になる"
+    (let [t {:biscuit/blocks [{:block/facts '[[user "alice"]]}]}]
+      (is (= #{} (:grant/scopes (ba/->grant t)))))))
+
+(deftest before-and-holder-are-read-without-a-base-too
+  (let [t {:biscuit/blocks [{:block/facts '[[scope "kotoba://graph/acme"]
+                                            [before "2026-09-01T00:00:00Z"]
+                                            [holder "did:key:zAlice"]]}]}
+        g (ba/->grant t)]
+    (is (= "2026-09-01T00:00:00Z" (:grant/expires g)))
+    (is (= "did:key:zAlice" (:grant/holder g)))))

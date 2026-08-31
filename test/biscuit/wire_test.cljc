@@ -150,3 +150,76 @@
         (is (false? (w/revoked? t #{(vec (repeat 64 0))}))))
       (testing "as does an empty set"
         (is (false? (w/revoked? t #{})))))))
+
+;; ── checks: decoded when this repo can evaluate them, refused by name when not ──
+;;
+;; Field numbers come from biscuit-auth/biscuit `schema.proto`, read rather than
+;; inferred: Rule{head=1, body=2, expressions=3}, Check{queries=1, kind=2},
+;; Check.Kind{One=0, All=1, Reject=2}.
+
+(def ^:private predicate-pb
+  {1 {:name :name :type :uint64} 2 {:name :terms :type :bytes :repeated true}})
+(def ^:private rule-pb
+  {1 {:name :head :type :bytes} 2 {:name :body :type :bytes :repeated true}
+   3 {:name :expressions :type :bytes :repeated true}})
+(def ^:private check-pb
+  {1 {:name :queries :type :bytes :repeated true} 2 {:name :kind :type :uint32}})
+(def ^:private block-pb
+  {1 {:name :symbols :type :string :repeated true}
+   6 {:name :checks :type :bytes :repeated true}})
+
+(defn- a-predicate [] (pb/encode predicate-pb {:name 1024 :terms []}))
+(defn- a-rule [& {:keys [expressions]}]
+  (pb/encode rule-pb (cond-> {:head (a-predicate) :body [(a-predicate)]}
+                       expressions (assoc :expressions expressions))))
+(defn- a-block [check-maps]
+  (pb/encode block-pb {:symbols ["thing"]
+                       :checks (mapv #(pb/encode check-pb %) check-maps)}))
+
+(deftest a-reference-tokens-check-is-decoded-into-what-the-evaluator-eats
+  (testing "biscuit-auth が発行した token の check が、
+            `biscuit.authorizer/run-block-checks` が消費する形で出てくる"
+    (let [m (w/token->model (w/decode-token (sample "test001_basic")))
+          b (second (:biscuit/blocks m))]
+      (is (= 1 (:block/check-count b)))
+      (is (= [{:body [["resource" (symbol "?0")]
+                      ["operation" "read"]
+                      ["right" (symbol "?0") "read"]]}]
+             (:block/checks b)))
+      (is (nil? (:block/checks-refused b))))))
+
+(deftest an-expression-is-still-refused-by-name
+  (testing "式を落とすと『制限しない check』になり、
+            読みにくい token が寛容な token として通ってしまう"
+    (let [d (w/decode-block (a-block [{:queries [(a-rule :expressions [[1 2 3]])]}]) [])]
+      (is (= [:check-carries-an-expression] (:checks-refused d)))
+      (is (nil? (:checks d)) "空ではなく不在。空の check 列は自明に満たされる"))))
+
+(deftest a-kind-other-than-one-is-refused
+  (testing "All / Reject は別の量化子。satisfied? は One の意味しか持たない"
+    (doseq [k [1 2]]
+      (let [d (w/decode-block (a-block [{:queries [(a-rule)] :kind k}]) [])]
+        (is (= [:check-kind-not-one] (:checks-refused d)) (str "kind=" k))
+        (is (nil? (:checks d)))))))
+
+(deftest a-disjunctive-check-is-refused-rather-than-truncated
+  (testing "query 複数は選言。先頭だけ残すと、データ次第で広くも狭くもなる"
+    (let [d (w/decode-block (a-block [{:queries [(a-rule) (a-rule)]}]) [])]
+      (is (= [:check-is-a-disjunction] (:checks-refused d)))
+      (is (nil? (:checks d))))))
+
+(deftest one-undecodable-check-withholds-the-whole-block
+  (testing "部分的に復元した集合が一番危ない —— every? で畳むと
+            読めなかった check が満たされたものとして数えられる"
+    (let [d (w/decode-block (a-block [{:queries [(a-rule)]}
+                                      {:queries [(a-rule :expressions [[9]])]}]) [])]
+      (is (= 2 (:check-count d)))
+      (is (nil? (:checks d)))
+      (is (= [:check-carries-an-expression] (:checks-refused d))))))
+
+(deftest a-block-with-no-checks-decodes-to-an-empty-list-not-to-absent
+  (testing "check が無いことと、check が読めなかったことは別"
+    (let [d (w/decode-block (a-block []) [])]
+      (is (= 0 (:check-count d)))
+      (is (= [] (:checks d)))
+      (is (nil? (:checks-refused d))))))

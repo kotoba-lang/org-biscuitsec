@@ -410,14 +410,21 @@
   successful conversion — `verify` is a separate call, and a caller that
   converts without verifying has decoded an attacker's facts."
   [token]
-  {:biscuit/version version
-   :biscuit/blocks
-   (mapv (fn [b]
+  (let [;; A predicate head arrives as a string out of the symbol table; the
+        ;; model uses symbols, as a hand-written token does. Facts were already
+        ;; bridged. CHECKS have to be bridged by the same function or they can
+        ;; never match: `biscuit.datalog/satisfied?` compares heads, so a check
+        ;; carrying "resource" against a fact carrying `resource` fails for
+        ;; every input -- a check that cannot pass, which is a token that can
+        ;; never be used rather than one that is too permissive, but wrong in
+        ;; the same silent way. Found by running a reference token's check.
+        ->head (fn [p] (into [(if (string? (first p)) (symbol (first p)) (first p))]
+                             (rest p)))]
+    {:biscuit/version version
+     :biscuit/blocks
+     (mapv (fn [b]
            {:block/index (:index b)
-            :block/facts (mapv (fn [f]
-                                 (into [(if (string? (first f)) (symbol (first f)) (first f))]
-                                       (rest f)))
-                               (:facts b))
+            :block/facts (mapv ->head (:facts b))
             :block/rule-count (:rule-count b)
             :block/check-count (:check-count b)
             ;; `:block/checks` carries what `biscuit.authorizer/run-block-checks`
@@ -427,11 +434,12 @@
             ;; rather than empty, because an empty check list is vacuously
             ;; satisfied and would make an unreadable token read as an
             ;; unrestricted one.
-            :block/checks (when (:checks b) (mapv (fn [c] {:body c}) (:checks b)))
+            :block/checks (when (:checks b)
+                            (mapv (fn [c] {:body (mapv ->head c)}) (:checks b)))
             :block/checks-refused (:checks-refused b)
             :block/next-public-key (:next-key b)
             :block/signature (:signature b)})
-         (map-indexed #(assoc %2 :index %1) (blocks-with-facts token)))})
+         (map-indexed #(assoc %2 :index %1) (blocks-with-facts token)))}))
 
 (defn revocation-ids
   "`[[index signature-bytes] …]` — the token's revocation identifiers.

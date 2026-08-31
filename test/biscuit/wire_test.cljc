@@ -182,10 +182,10 @@
     (let [m (w/token->model (w/decode-token (sample "test001_basic")))
           b (second (:biscuit/blocks m))]
       (is (= 1 (:block/check-count b)))
-      (is (= [{:body [["resource" (symbol "?0")]
-                      ["operation" "read"]
-                      ["right" (symbol "?0") "read"]]}]
-             (:block/checks b)))
+      (testing "述語名は symbol —— fact と同じ橋を通る。文字列のままだと
+                `satisfied?` の照合が全入力で外れ、通れない check になる"
+        (is (= [{:body '[[resource ?0] [operation "read"] [right ?0 "read"]]}]
+               (:block/checks b))))
       (is (nil? (:block/checks-refused b))))))
 
 (deftest an-expression-is-still-refused-by-name

@@ -18,8 +18,8 @@
   | signature payload **v0 and v1**, chained public keys | **yes** |
   | rules | counted, not decoded |
   | checks, when this repo can evaluate them | **yes** |
-  | checks carrying an expression, `kind` other than `One`, or a disjunction | **refused by name** |
-  | **expressions** (`Op`/`OpUnary`/`OpBinary`/`OpClosure`) | **refused by name** |
+  | expression **shape** (`Op`/`OpUnary`/`OpBinary`) | **yes** -- the operator subset is `biscuit.expression`'s decision, not this namespace's |
+  | checks with `kind` other than `One`, a disjunction, or an `OpClosure` | **refused by name** |
   | third-party (`externalSignature`) blocks | **refused by name** |
   | facts-only authority token writer | **yes** |
 
@@ -95,6 +95,15 @@
    2 {:name :body :type :bytes :repeated true}
    3 {:name :expressions :type :bytes :repeated true}
    4 {:name :scope :type :bytes :repeated true}})
+(def ^:private expression-schema {1 {:name :ops :type :bytes :repeated true}})
+(def ^:private op-schema
+  {1 {:name :value :type :bytes}
+   2 {:name :unary :type :bytes}
+   3 {:name :binary :type :bytes}
+   4 {:name :closure :type :bytes}})
+(def ^:private op-unary-schema {1 {:name :kind :type :uint32}})
+(def ^:private op-binary-schema {1 {:name :kind :type :uint32}})
+
 (def ^:private check-schema
   {1 {:name :queries :type :bytes :repeated true}
    2 {:name :kind :type :uint32}})
@@ -285,6 +294,34 @@
   (let [p (pb/decode predicate-schema bs)]
     (into [(table (:name p))] (map #(term % table)) (:terms p))))
 
+(defn- decode-expression
+  "One Expression → a flat postfix op list for `biscuit.expression/evaluate`,
+  or `{:refused reason}`.
+
+  The kinds are passed through as the spec's enum NUMBERS. Naming them here
+  would put the subset decision in two places, and the evaluator is where it
+  belongs -- this decodes the shape, and refuses only what has no shape it
+  could hand on."
+  [bs table]
+  (try
+  (let [e (pb/decode expression-schema bs)
+        ops (mapv (fn [o]
+                    (let [d (pb/decode op-schema o)]
+                      (cond
+                        (:closure d) {:refused :closure-not-evaluated}
+                        (:value d) [:value (term (:value d) table)]
+                        (:unary d) [:unary (or (:kind (pb/decode op-unary-schema (:unary d))) 0)]
+                        (:binary d) [:binary (or (:kind (pb/decode op-binary-schema (:binary d))) 0)]
+                        :else {:refused :op-with-no-content})))
+                  (:ops e))
+        bad (first (filter :refused ops))]
+    (or bad ops))
+    ;; Bytes that are not a well-formed Expression must REFUSE, not throw. The
+    ;; input is an untrusted token, and a decoder that crashes on it turns a
+    ;; malformed credential into an outage.
+    (catch #?(:clj Exception :cljs :default) _
+      {:refused :expression-unreadable})))
+
 (defn- decode-check
   "One Check → `{:body [predicate…]}`, or `{:refused reason}`.
 
@@ -317,10 +354,13 @@
       (not= 0 kind) {:refused :check-kind-not-one}
       (not= 1 (count qs)) {:refused :check-is-a-disjunction}
       :else
-      (let [r (pb/decode rule-schema (first qs))]
-        (if (seq (:expressions r))
-          {:refused :check-carries-an-expression}
-          {:body (mapv #(predicate % table) (:body r))})))))
+      (let [r (pb/decode rule-schema (first qs))
+            exprs (mapv #(decode-expression % table) (:expressions r))
+            bad (first (filter :refused exprs))]
+        (if bad
+          {:refused (:refused bad)}
+          {:body (mapv #(predicate % table) (:body r))
+           :expressions exprs})))))
 
 (defn decode-block
   "Block bytes → `{:symbols :facts :rule-count :check-count :version}`.
@@ -354,7 +394,7 @@
            bad (filterv :refused ds)]
        (if (seq bad)
          {:checks-refused (mapv :refused bad)}
-         {:checks (mapv :body ds)})))))
+         {:checks (mapv #(select-keys % [:body :expressions]) ds)})))))
 
 (defn decode-token
   "Token bytes → `{:root-key-id :blocks [{:block :next-key :signature …}]}`.
@@ -512,7 +552,9 @@
             ;; satisfied and would make an unreadable token read as an
             ;; unrestricted one.
             :block/checks (when (:checks b)
-                            (mapv (fn [c] {:body (mapv ->head c)}) (:checks b)))
+                            (mapv (fn [c] {:body (mapv ->head (:body c))
+                                           :expressions (vec (:expressions c))})
+                                  (:checks b)))
             :block/checks-refused (:checks-refused b)
             :block/next-public-key (:next-key b)
             :block/signature (:signature b)})

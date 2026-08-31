@@ -185,16 +185,30 @@
       (is (= 1 (:block/check-count b)))
       (testing "述語名は symbol —— fact と同じ橋を通る。文字列のままだと
                 `satisfied?` の照合が全入力で外れ、通れない check になる"
-        (is (= [{:body '[[resource ?0] [operation "read"] [right ?0 "read"]]}]
-               (:block/checks b))))
+        (is (= [{:body '[[resource ?0] [operation "read"] [right ?0 "read"]]
+                 :expressions []}]
+               (:block/checks b))
+            "式の無い check は :expressions [] を運ぶ —— 不在ではなく空"))
       (is (nil? (:block/checks-refused b))))))
 
-(deftest an-expression-is-still-refused-by-name
-  (testing "式を落とすと『制限しない check』になり、
-            読みにくい token が寛容な token として通ってしまう"
+(deftest malformed-expression-bytes-refuse-rather-than-throw
+  (testing "入力は信用できない token。壊れた credential で decoder が落ちたら、
+            それは可用性の問題になる"
     (let [d (w/decode-block (a-block [{:queries [(a-rule :expressions [[1 2 3]])]}]) [])]
-      (is (= [:check-carries-an-expression] (:checks-refused d)))
+      (is (= [:expression-unreadable] (:checks-refused d)))
       (is (nil? (:checks d)) "空ではなく不在。空の check 列は自明に満たされる"))))
+
+(deftest a-well-formed-expression-is-decoded-and-its-operators-are-not-judged-here
+  (testing "どの演算子を評価するかは `biscuit.expression` の決定。
+            wire は形を復元して渡すだけ"
+    (let [expr (pb/encode {1 {:name :ops :type :bytes :repeated true}}
+                          {:ops [(pb/encode {1 {:name :value :type :bytes}}
+                                            {:value (pb/encode {2 {:name :integer :type :int64}}
+                                                               {:integer 7})})]})
+          d (w/decode-block (a-block [{:queries [(a-rule :expressions [expr])]}]) [])]
+      (is (nil? (:checks-refused d)))
+      (is (= [[[[:value 7]]]] (mapv :expressions (:checks d)))
+          "check ごとに式の列、式ごとに op の列 —— 3 段"))))
 
 (deftest a-kind-other-than-one-is-refused
   (testing "All / Reject は別の量化子。satisfied? は One の意味しか持たない"
@@ -216,7 +230,7 @@
                                       {:queries [(a-rule :expressions [[9]])]}]) [])]
       (is (= 2 (:check-count d)))
       (is (nil? (:checks d)))
-      (is (= [:check-carries-an-expression] (:checks-refused d))))))
+      (is (= [:expression-unreadable] (:checks-refused d))))))
 
 (deftest a-block-with-no-checks-decodes-to-an-empty-list-not-to-absent
   (testing "check が無いことと、check が読めなかったことは別"

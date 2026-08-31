@@ -19,7 +19,30 @@
   Both refuse, and distinguishing them is what tells an operator that their
   policy set has a hole rather than that their rule fired."
   (:require [biscuit.datalog :as d]
+            [biscuit.expression :as x]
             [biscuit.token :as token]))
+
+(defn- check-verdict
+  "-> `:pass`, `:fail`, or `{:refused reason}` for ONE check.
+
+  A check of kind One passes when at least one derivation of its body also
+  satisfies every expression. So a binding whose expressions this repo cannot
+  evaluate does not sink the check: another binding may satisfy it cleanly, and
+  refusing then would be stricter than the spec. But if NO binding passes and
+  one refused, the answer is refused rather than failed -- the token may well
+  be satisfiable and this implementation could not tell."
+  [facts {:keys [body expressions]}]
+  (let [bindings (d/query facts body)]
+    (if (empty? bindings)
+      :fail
+      (loop [[b & more] (seq bindings) refusal nil]
+        (if (nil? b)
+          (or refusal :fail)
+          (let [r (x/holds? (or expressions []) b)]
+            (cond
+              (:refused r) (recur more (or refusal r))
+              (:ok? r) :pass
+              :else (recur more refusal))))))))
 
 (defn- run-block-checks
   [t index authorizer-facts budget]
@@ -28,8 +51,12 @@
     (if (:refused sat)
       {:refused (:refused sat) :index index :detail (dissoc sat :refused)}
       (let [checks (get-in t [:biscuit/blocks index :block/checks])
-            failed (into [] (remove #(d/satisfied? (:facts sat) (:body %)) checks))]
-        {:failed failed :index index}))))
+            verdicts (mapv (fn [c] [c (check-verdict (:facts sat) c)]) checks)
+            refused (first (keep (fn [[_ v]] (when (map? v) v)) verdicts))
+            failed (into [] (keep (fn [[c v]] (when (= :fail v) c)) verdicts))]
+        (cond
+          refused {:refused (:refused refused) :index index :detail (:detail refused)}
+          :else {:failed failed :index index})))))
 
 (defn- undecoded-checks
   "Blocks that say they carry checks but did not hand any over.

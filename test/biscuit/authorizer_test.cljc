@@ -75,3 +75,44 @@
          (let [r (az/run-checks m v {:facts '[[resource "file1"] [operation "read"]]})]
            (is (true? (:allowed? r))
                "resource と operation を与えると通る —— check が実際に評価されている"))))))
+
+;; ── a token that expires ────────────────────────────────────────────────────
+
+(defn- expiring-token
+  "A check reading `time($t), $t < limit` -- the shape a delegation uses to
+  stop being valid."
+  [limit]
+  {:biscuit/blocks
+   [{:block/check-count 1
+     :block/facts [] :block/rules []
+     :block/checks [{:body '[[time ?t]]
+                     :expressions [[[:value '?t] [:value limit] [:binary 0]]]}]}]})
+
+(deftest a-time-bound-is-honoured-in-both-directions
+  (testing "これが式評価を足した理由 —— 期限が実際に効く"
+    (is (true? (:allowed? (az/run-checks (expiring-token 200) {:ok? true}
+                                         {:facts '[[time 100]]})))
+        "期限前は通る")
+    (is (= :check-failed (:reason (az/run-checks (expiring-token 200) {:ok? true}
+                                                 {:facts '[[time 300]]})))
+        "期限後は落ちる —— 以前はここに到達すらしなかった")))
+
+(deftest an-operator-outside-the-subset-refuses-rather-than-passing-or-failing
+  (testing "「評価できない」は「評価して落ちた」ではない"
+    (let [t {:biscuit/blocks
+             [{:block/check-count 1 :block/facts [] :block/rules []
+               :block/checks [{:body '[[time ?t]]
+                               :expressions [[[:value '?t] [:value 1] [:binary 8]]]}]}]}
+          r (az/run-checks t {:ok? true} {:facts '[[time 100]]})]
+      (is (false? (:allowed? r)))
+      (is (= :binary-operator-not-evaluated (:reason r))))))
+
+(deftest one-binding-that-satisfies-is-enough
+  (testing "kind One —— 評価できない束縛が在っても、清く満たす束縛が
+            1 つ在れば通る。そこで拒否すると spec より厳しくなる"
+    (let [t {:biscuit/blocks
+             [{:block/check-count 1 :block/facts [] :block/rules []
+               :block/checks [{:body '[[time ?t]]
+                               :expressions [[[:value '?t] [:value 200] [:binary 0]]]}]}]}]
+      (is (true? (:allowed? (az/run-checks t {:ok? true}
+                                           {:facts '[[time 100] [time 999]]})))))))

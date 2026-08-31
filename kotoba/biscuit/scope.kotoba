@@ -74,7 +74,7 @@
 ;; (ADR-2608261100).
 
 (ns biscuit.scope
-  (:export [init offer-fact end-block decide
+  (:export [main init offer-fact end-block decide
             blocks-seen token-holder holder-count
             authority-confers? still-granted? widening-attempted?]))
 
@@ -226,3 +226,37 @@
 (defn authority-confers? [state :document] :bool (db state :authority-kind))
 (defn still-granted? [state :document] :bool (db state :granted))
 (defn widening-attempted? [state :document] :bool (db state :widening))
+
+;; --- the artifact's own conformance check ------------------------------------------
+;;
+;; `main` is the browser profile's entry point -- `runtime/browser-host.mjs`
+;; refuses to instantiate a module without one -- and it is not a stub. It
+;; walks one token end to end: an authority block that confers nothing and
+;; an appended block that names a kind, which is the widening this slice
+;; exists to refuse. It answers 0 only when that still decides the way this
+;; object was built to decide, so a COMPILED artifact can be asked whether
+;; it is itself by a host that knows nothing about biscuits.
+;;
+;; One walk, not several: a module's fuel is a private global baked in at
+;; compile time (512 by default) and is spent over the life of an INSTANCE,
+;; so everything `main` does shares one budget. The native backends put a
+;; second bound on the same function, evaluating it as a compile-time
+;; oracle. The wider check lives in the suite, which has neither limit.
+
+(defn- cap-fact [k :string r :string] :document
+  (document-map :pred (document-string "cap")
+                :a (document-string k)
+                :b (document-string r)))
+
+(defn main [] :i64
+  (let [s0 (init (document-map :kind (document-string ":net/connect")
+                               :resource (document-string "x")
+                               :holder (document-string "")))
+        b0 (end-block s0)
+        b1 (end-block (offer-fact b0 (cap-fact ":net/connect" "x")))
+        d (decide b1 (document-map :policy-allows? (document-bool true)
+                                   :policy-wildcard? (document-bool false)
+                                   :expired? (document-bool false)
+                                   :require-holder? (document-bool false)
+                                   :forbid-wildcard? (document-bool false)))]
+    (if (= d :attenuation-cannot-introduce-a-kind) 0 1)))

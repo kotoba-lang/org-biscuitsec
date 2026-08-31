@@ -1,5 +1,7 @@
 (ns biscuit.kotoba-test
-  (:require [biscuit.keys :as k]
+  (:require [authority.scope :as scope]
+            [biscuit.authority :as ba]
+            [biscuit.keys :as k]
             [biscuit.kotoba :as bk]
             [biscuit.token :as bt]
             [clojure.test :refer [deftest is testing]]))
@@ -76,3 +78,65 @@
                           :next-public-key (:public k1)
                           :private-key (:private k1) :sign-fn k/sign-fn}))]
     (is (= "2026-09-01T00:00:00Z" (:grant/expires (first (:grants (bk/->delegated t kinds))))))))
+
+;; ── narrowing is the lattice's, not string identity's ────────────────────────
+
+(defn- append [t facts]
+  (bt/append t {:facts facts :next-public-key (:public k1)
+                :private-key (:private k1) :sign-fn k/sign-fn}))
+
+(defn- resources [t] (:grant/resources (first (:grants (bk/->delegated t kinds)))))
+
+(deftest a-wildcard-narrowed-to-a-member-is-that-member
+  (testing "the act Biscuit is chosen for, which set/intersection destroyed"
+    ;; "kotoba://graph/*" INTERSECT "kotoba://graph/g1" is the empty set, so
+    ;; the previous fold turned an ordinary attenuation into a token reaching
+    ;; nothing. Found 2026-08-31 by a consumer that had to fold per block
+    ;; against authority.chain to get a correct answer out of this namespace.
+    (let [t (-> (tok '[[cap "graph-read" "kotoba://graph/*"]])
+                (append '[[cap "graph-read" "kotoba://graph/g1"]]))]
+      (is (= ["kotoba://graph/g1"] (resources t)))))
+  (testing "and it still cannot widen"
+    (let [t (-> (tok '[[cap "graph-read" "kotoba://graph/g1"]])
+                (append '[[cap "graph-read" "kotoba://graph/*"]]))]
+      (is (= ["kotoba://graph/g1"] (resources t))
+          "a later block asking for the namespace gets only what it was given")))
+  (testing "and a sibling it was never granted is not reachable"
+    (let [t (-> (tok '[[cap "graph-read" "kotoba://graph/g1"]])
+                (append '[[cap "graph-read" "kotoba://graph/g2"]]))]
+      (is (nil? (resources t))
+          "two incomparable scopes have no common lower bound, so the kind drops"))))
+
+(deftest an-opaque-resource-still-narrows-by-identity
+  (testing "`:cap/resource` is not always a scope — a model alias has only identity"
+    (let [t (-> (tok '[[cap "infer" "murakumo-main"] [cap "infer" "other-model"]])
+                (append '[[cap "infer" "murakumo-main"]]))]
+      (is (= ["murakumo-main"] (resources t)))))
+  (testing "and a name that parses on only one side relates to nothing"
+    (let [t (-> (tok '[[cap "infer" "kotoba://model/x"]])
+                (append '[[cap "infer" "murakumo-main"]]))]
+      (is (nil? (resources t))
+          "dropping is the safe direction; it must not fall back to string equality"))))
+
+(deftest this-library-holds-one-answer-to-what-two-blocks-confer
+  (testing "->delegated and ->grant narrow the same scopes the same way"
+    ;; biscuit.authority/->grant has always folded with authority.grant/meet.
+    ;; When ->delegated intersected strings instead, this library carried TWO
+    ;; answers to `what do two blocks jointly confer` and only one of them was
+    ;; the lattice -- the exact duplication `authority` exists to prevent.
+    (doseq [[outer inner] [["kotoba://graph/*" "kotoba://graph/g1"]
+                           ["kotoba://graph/g1" "kotoba://graph/*"]
+                           ["kotoba://graph/g1" "kotoba://graph/g1"]
+                           ["kotoba://graph/g1" "kotoba://graph/g2"]]]
+      (let [delegated (-> (tok [['cap "graph-read" outer]])
+                          (append [['cap "graph-read" inner]]))
+            ;; ->grant folds the token's blocks onto a BASE, so `outer` is the
+            ;; base and the single block carries `inner`. Handing it an empty
+            ;; base would meet everything down to nothing and the comparison
+            ;; would pass for the wrong reason.
+            scoped (tok [['scope inner]])
+            via-delegated (set (resources delegated))
+            via-grant (set (keep scope/render
+                                 (:grant/scopes (ba/->grant scoped {:scopes [outer]}))))]
+        (is (= via-grant via-delegated)
+            (str "the two folds disagree on " outer " then " inner))))))

@@ -164,6 +164,31 @@
     (throw (ex-info "unsupported fact term in the facts-only writer"
                     {:type :biscuit/unsupported-term :term x}))))
 
+(defn- encode-facts-block
+  "Facts -> block bytes, given every symbol the EARLIER blocks already defined.
+
+  A term index is meaningless without the table as of that block: indices
+  count from 1024 across the CUMULATIVE table, while a block's own `symbols`
+  field carries only what it adds. Encoding an appended block as if it were
+  an authority block would therefore re-declare the symbols it shares with
+  block 0 and point every term at the wrong entry -- a token that decodes to
+  different facts than it was written with, which is worse than one that
+  fails to decode."
+  [facts prior-symbols]
+  (let [facts (vec facts)
+        prior (vec prior-symbols)
+        own (vec (remove (set prior) (fact-symbols facts)))
+        table (into prior own)
+        encoded-facts
+        (mapv (fn [[head & terms]]
+                (pb/encode fact-schema
+                           {:predicate
+                            (pb/encode predicate-schema
+                                       {:name (symbol-index table (name head))
+                                        :terms (mapv #(encode-term table %) terms)})}))
+              facts)]
+    (pb/encode block-schema {:symbols own :version 3 :facts encoded-facts})))
+
 (defn encode-authority-block
   "Encode a Biscuit v3 authority block containing facts only.
 
@@ -177,17 +202,7 @@
   together; silently omitting a restriction would mint more authority than
   the caller requested."
   [facts]
-  (let [facts (vec facts)
-        symbols (fact-symbols facts)
-        encoded-facts
-        (mapv (fn [[head & terms]]
-                (pb/encode fact-schema
-                           {:predicate
-                            (pb/encode predicate-schema
-                                       {:name (symbol-index symbols (name head))
-                                        :terms (mapv #(encode-term symbols %) terms)})}))
-              facts)]
-    (pb/encode block-schema {:symbols symbols :version 3 :facts encoded-facts})))
+  (encode-facts-block facts []))
 
 (defn encode-authority-token
   "Mint an attenuable Biscuit v3 token with one facts-only authority block.
@@ -375,6 +390,68 @@
                         :blocks (conj blocks (merge b d))}))
                    {:symbols [] :blocks []}
                    (:blocks token))))
+
+(defn append-block
+  "Attenuate a wire token: add one facts-only block, signed with the key the
+  token itself carries.
+
+  **This is the operation Biscuit is chosen for, and it needs nothing of the
+  issuer.** An unsealed token carries its proof secret, which is the private
+  key matching the last block's `next-key`; whoever holds the token can
+  therefore sign one more block, and names a fresh `next-public-key` of their
+  own that the issuer has never seen. The reader side already folds later
+  blocks as narrowing only (`biscuit.kotoba/->delegated`), so an appended
+  block can remove authority and cannot add it.
+
+  Until 2026-08-31 this library could READ an attenuated wire token and not
+  WRITE one, so every multi-block test was built by hand and the claim that a
+  holder could narrow a token we minted rested on the format rather than on
+  anything measured here.
+
+  `sign-fn` is `(fn [private-key payload-bytes] signature-bytes)`, the same
+  injected shape `encode-authority-token` takes. `proof-secret` defaults to
+  the token's own, which is the whole point; pass it explicitly only when the
+  secret is held somewhere the token is not.
+
+  Returns raw token octets. A sealed token is refused rather than
+  approximated -- sealing is the statement that no further block may be
+  added."
+  [token-bytes {:keys [facts proof-secret next-secret next-public-key sign-fn]}]
+  (when-not sign-fn
+    (throw (ex-info "a Biscuit writer requires sign-fn" {:type :biscuit/no-signer})))
+  (let [t (decode-token token-bytes)
+        secret (or proof-secret (get-in t [:proof :next-secret]))]
+    (when (get-in t [:proof :final-signature])
+      (throw (ex-info "this token is sealed; no block may be appended"
+                      {:type :biscuit/sealed})))
+    (when-not secret
+      (throw (ex-info "no proof secret: the token carries none and none was given"
+                      {:type :biscuit/no-proof-secret})))
+    (let [next-secret (require-size "next-secret" 32 next-secret)
+          next-public-key (require-size "next-public-key" 32 next-public-key)
+          prior (:symbols (last (blocks-with-facts t)))
+          block (encode-facts-block facts prior)
+          payload (signed-payload {:version 0 :block block :next-key-alg 0
+                                   :next-key next-public-key :order :alg-first})
+          signature (require-size "signature" 64 (sign-fn secret payload))
+          re-sign (fn [b]
+                    (pb/encode signed-block-schema
+                               (cond-> {:block (:block b)
+                                        :next-key (pb/encode public-key-schema
+                                                             {:algorithm (:next-key-alg b)
+                                                              :key (:next-key b)})
+                                        :signature (:signature b)}
+                                 (some? (:version b)) (assoc :version (:version b)))))
+          appended (pb/encode signed-block-schema
+                              {:block block
+                               :next-key (pb/encode public-key-schema
+                                                    {:algorithm 0 :key next-public-key})
+                               :signature signature})]
+      (pb/encode biscuit-schema
+                 (cond-> {:authority (re-sign (first (:blocks t)))
+                          :blocks (conj (mapv re-sign (rest (:blocks t))) appended)
+                          :proof (pb/encode proof-schema {:next-secret next-secret})}
+                   (some? (:root-key-id t)) (assoc :root-key-id (:root-key-id t)))))))
 
 (defn verify
   "Walk the key chain from `root-public-key`. `verify-fn` is

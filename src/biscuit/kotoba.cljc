@@ -32,7 +32,9 @@
   issuer intended) and does not throw (a token from a newer fleet is an
   ordinary event). It lands in `:grant/rejected`, and a rejected kind confers
   nothing — so the failure is toward less authority, and it is visible."
-  (:require [authority.scope :as scope]
+  (:require [authority.chain :as chain]
+            [authority.grant :as grant]
+            [authority.scope :as scope]
             [clojure.set :as set]
             [clojure.string :as str]))
 
@@ -154,3 +156,92 @@
   through the ordinary path rather than a sentinel."
   [{:keys [grants]}]
   (empty? grants))
+
+;; ── the scope decision, once ─────────────────────────────────────────────────
+
+(defn- block-resources
+  "The resources one block asserts for `kinds`, or nil if it asserts none."
+  [block kinds]
+  (let [d (->delegated {:biscuit/blocks [block]} kinds)]
+    (when-not (missing-grant? d)
+      (vec (mapcat :grant/resources (:grants d))))))
+
+(defn ->chain
+  "A token model -> one `authority.grant` link PER BLOCK, for
+  `authority.chain` to fold.
+
+  Not `->delegated`'s folded result, because the DECISION is the lattice's.
+  `->delegated` does what only it can do — read facts, close the kind set,
+  report rejects — and `authority.chain/fold` does what only it can do: meet
+  the links and record, in `:authority/attempts`, every over-claim a block
+  made. A decision whose basis is not recorded cannot be audited later.
+
+  `expires` is threaded from the whole-token read because `before` is a
+  property of the token rather than of one block, and `meet` takes the
+  earlier of two bounds anyway."
+  [token-model kinds expires]
+  (into []
+        (keep (fn [b]
+                (when-let [rs (block-resources b kinds)]
+                  (grant/grant {:scopes rs :expires expires}))))
+        (:biscuit/blocks token-model)))
+
+(defn authorize
+  "A **verified** token + what is being asked -> the decision.
+
+  This is the whole `does this token reach that resource` question, in one
+  place, so that two consumers cannot answer it two ways. It was written
+  twice before it was written here: `network-awai/app-hyakka` had it for the
+  metered wiki walk and `net-kotobase` was about to need the same thing for
+  its paid graph reads, and a second copy of a covering decision is exactly
+  what `kotoba-lang/authority` exists to prevent.
+
+  `:verified?` is REQUIRED and is not defaulted. `biscuit.wire/token->model`
+  hands back a model whether or not a signature was checked, and its own
+  docstring says a caller that converts without verifying has decoded an
+  attacker's facts. Refusing here rather than trusting every caller to
+  remember means a deployment with no root key configured answers
+  `:pass/unverified` — a value that is neither a grant nor an ordinary
+  denial, so `could not check` and `checked and denied` cannot print the
+  same (superproject ADR-2608136000).
+
+  The holder is deliberately NOT passed to `authority.chain`. Nothing in a
+  bearer presentation proves the presenter is the principal a `holder` fact
+  names, and a holder check against an unauthenticated presenter would
+  report `:wrong-holder` for a mismatch while reporting `:granted` for a
+  stolen token — an assertion that discriminates in one direction only. The
+  binding a holder actually has is attenuation."
+  [{:keys [token-model kinds verified? requested now]}]
+  (if-not (true? verified?)
+    {:pass/allowed? false :pass/reason :pass/unverified :pass/grants []}
+    (let [delegated (->delegated token-model kinds)]
+      (if (missing-grant? delegated)
+        {:pass/allowed? false
+         :pass/reason :pass/no-grant
+         :pass/grants []
+         :pass/rejected (:grant/rejected delegated)}
+        (let [expires (:grant/expires (first (:grants delegated)))
+              decision (chain/authorize {:chain (->chain token-model kinds expires)
+                                         :requested requested
+                                         :now now})]
+          {:pass/allowed? (:authority/allowed? decision)
+           :pass/reason (if (:authority/allowed? decision)
+                          :pass/granted
+                          (:authority/reason decision))
+           :pass/grants (:grants delegated)
+           :pass/rejected (:grant/rejected delegated)
+           :pass/holder (:grant/holder delegated)
+           :pass/expires (:grant/expires (:authority/effective decision))
+           :pass/depth (:authority/depth decision)})))))
+
+(defn retry-with-payment?
+  "Is this refusal one a fresh grant would fix?
+
+  Expired or out-of-scope means the presenter holds a real token that does
+  not reach this question, and the useful answer is how to get one that
+  does. Malformed, unrooted or grant-less is NOT — telling someone to obtain
+  a new token when what they sent was never yours takes their effort for a
+  problem it does not solve. On a paid surface the difference is a 402
+  against a 403."
+  [reason]
+  (contains? #{:expired-or-no-trusted-time :out-of-scope :empty-chain} reason))

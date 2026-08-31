@@ -16,7 +16,9 @@
   | container (`Biscuit`/`SignedBlock`/`PublicKey`/`Proof`) | **yes** |
   | block structure, symbol table, facts, predicates, terms | **yes** |
   | signature payload **v0 and v1**, chained public keys | **yes** |
-  | rules, checks | counted, not decoded |
+  | rules | counted, not decoded |
+  | checks, when this repo can evaluate them | **yes** |
+  | checks carrying an expression, `kind` other than `One`, or a disjunction | **refused by name** |
   | **expressions** (`Op`/`OpUnary`/`OpBinary`/`OpClosure`) | **refused by name** |
   | third-party (`externalSignature`) blocks | **refused by name** |
   | facts-only authority token writer | **yes** |
@@ -24,6 +26,19 @@
   An expression is where a partial decoder would do real damage: an operator
   it silently dropped is a *check that no longer restricts*, which reads as a
   more permissive token rather than as an error.
+
+  Checks themselves are now decoded, which extends that rule rather than
+  softening it. A check this repo can evaluate -- predicates only, `kind` One,
+  a single query -- comes back as `{:body [predicate…]}`, the shape
+  `biscuit.authorizer/run-block-checks` already consumes. Anything else is
+  refused by name, and the refusal withholds the WHOLE block: `:checks` is
+  absent rather than partial, because an empty or partial check list folds to
+  vacuously satisfied, and a token would become more permissive by being
+  harder to read.
+
+  Until this, a token carrying any check had to be rejected wholesale even when
+  its attenuation was perfectly evaluable -- which meant refusing the common
+  case, since attenuation is the point of a biscuit.
 
   ## The byte order was decided by the sample, not by me
 
@@ -71,6 +86,18 @@
    8 {:name :public-keys :type :bytes :repeated true}})
 
 (def ^:private fact-schema {1 {:name :predicate :type :bytes}})
+
+;; Field numbers from biscuit-auth/biscuit `schema.proto`, read rather than
+;; inferred: Rule{head=1, body=2, expressions=3, scope=4},
+;; Check{queries=1, kind=2}, Check.Kind{One=0, All=1, Reject=2}.
+(def ^:private rule-schema
+  {1 {:name :head :type :bytes}
+   2 {:name :body :type :bytes :repeated true}
+   3 {:name :expressions :type :bytes :repeated true}
+   4 {:name :scope :type :bytes :repeated true}})
+(def ^:private check-schema
+  {1 {:name :queries :type :bytes :repeated true}
+   2 {:name :kind :type :uint32}})
 (def ^:private predicate-schema
   {1 {:name :name :type :uint64}
    2 {:name :terms :type :bytes :repeated true}})
@@ -243,6 +270,43 @@
   (let [p (pb/decode predicate-schema bs)]
     (into [(table (:name p))] (map #(term % table)) (:terms p))))
 
+(defn- decode-check
+  "One Check → `{:body [predicate…]}`, or `{:refused reason}`.
+
+  ## What is decoded, and what stays refused by name
+
+  This extends the policy stated at the top of this namespace rather than
+  softening it. An expression is still refused; what changes is that a check
+  WITHOUT one is now readable, so a token whose attenuation this
+  implementation can actually evaluate no longer has to be rejected wholesale.
+
+  Three things are refused, each because honouring it would mean claiming a
+  semantics this repo does not implement:
+
+  - **expressions** — `biscuit.datalog` evaluates predicates and has no
+    expression evaluator at all. A dropped operator is a check that no longer
+    restricts, which reads as a more permissive token rather than as an error.
+  - **kind other than One** — `All` and `Reject` are different quantifiers, and
+    `biscuit.datalog/satisfied?` implements One. Treating All as One would
+    accept a token that satisfied a single binding of a check demanding every
+    binding.
+  - **more than one query** — several queries in a check are a disjunction, and
+    the model shape carries a single `:body`. Keeping the first would silently
+    drop the alternatives, which narrows or widens depending on the data and is
+    unpredictable either way."
+  [bs table]
+  (let [c (pb/decode check-schema bs)
+        kind (or (:kind c) 0)
+        qs (:queries c)]
+    (cond
+      (not= 0 kind) {:refused :check-kind-not-one}
+      (not= 1 (count qs)) {:refused :check-is-a-disjunction}
+      :else
+      (let [r (pb/decode rule-schema (first qs))]
+        (if (seq (:expressions r))
+          {:refused :check-carries-an-expression}
+          {:body (mapv #(predicate % table) (:body r))})))))
+
 (defn decode-block
   "Block bytes → `{:symbols :facts :rule-count :check-count :version}`.
 
@@ -257,14 +321,25 @@
     (when (seq (:public-keys b))
       (throw (ex-info "third-party blocks are not implemented — refused rather than approximated"
                       {:type :biscuit/unsupported})))
-    {:version (:version b)
+    (merge
+     {:version (:version b)
      :context (:context b)
      :own-symbols (vec (:symbols b))
      :symbols symbols
      :facts (mapv (fn [f] (predicate (:predicate (pb/decode fact-schema f)) table))
                   (:facts b))
      :rule-count (count (:rules b))
-     :check-count (count (:checks b))}))
+     :check-count (count (:checks b))}
+     ;; `:checks` is present ONLY when every check in the block decoded. A
+     ;; partially decoded set would be the worst of both: a consumer folding it
+     ;; with `every?` treats the missing ones as satisfied, so a token would get
+     ;; MORE permissive by being harder to read. `:checks-refused` names why,
+     ;; and `:check-count` stays the authority on whether any exist.
+     (let [ds (mapv #(decode-check % table) (:checks b))
+           bad (filterv :refused ds)]
+       (if (seq bad)
+         {:checks-refused (mapv :refused bad)}
+         {:checks (mapv :body ds)})))))
 
 (defn decode-token
   "Token bytes → `{:root-key-id :blocks [{:block :next-key :signature …}]}`.
@@ -345,6 +420,15 @@
                                (:facts b))
             :block/rule-count (:rule-count b)
             :block/check-count (:check-count b)
+            ;; `:block/checks` carries what `biscuit.authorizer/run-block-checks`
+            ;; consumes -- `{:body [predicate…]}` per check. It is present only
+            ;; when every check in the block decoded; when any did not,
+            ;; `:block/checks-refused` names the reasons and this key is ABSENT
+            ;; rather than empty, because an empty check list is vacuously
+            ;; satisfied and would make an unreadable token read as an
+            ;; unrestricted one.
+            :block/checks (when (:checks b) (mapv (fn [c] {:body c}) (:checks b)))
+            :block/checks-refused (:checks-refused b)
             :block/next-public-key (:next-key b)
             :block/signature (:signature b)})
          (map-indexed #(assoc %2 :index %1) (blocks-with-facts token)))})

@@ -140,3 +140,88 @@
                                  (:grant/scopes (ba/->grant scoped {:scopes [outer]}))))]
         (is (= via-grant via-delegated)
             (str "the two folds disagree on " outer " then " inner))))))
+
+;; ── one scope decision, for every consumer ──────────────────────────────────
+
+(def ^:private read-kinds #{:graph-read})
+(def ^:private g1 "kotoba://graph/g1")
+(def ^:private g2 "kotoba://graph/g2")
+(def ^:private star "kotoba://graph/*")
+
+(defn- model
+  "A token model in the shape `biscuit.wire/token->model` produces. No crypto:
+  these cases are about what facts MEAN once a signature is off them, which is
+  why `authorize` takes `:verified?` separately."
+  [& blocks]
+  {:biscuit/blocks (vec (for [facts blocks] {:block/facts (vec facts)}))})
+
+(defn- decide [t requested now & {:keys [verified?] :or {verified? true}}]
+  (bk/authorize {:token-model t :kinds read-kinds :verified? verified?
+                 :requested requested :now now}))
+
+(def ^:private whole
+  (model [['cap "graph-read" star] ['before "2026-09-01T00:00:00Z"]
+          ['holder "did:key:zBuyer"]]))
+
+(deftest authorize-grants-what-the-token-covers
+  (let [d (decide whole g1 "2026-08-31T00:00:00Z")]
+    (is (true? (:pass/allowed? d)))
+    (is (= :pass/granted (:pass/reason d)))
+    (is (= "did:key:zBuyer" (:pass/holder d)))
+    (is (true? (:pass/allowed? (decide whole g2 "2026-08-31T00:00:00Z")))
+        "the wildcard reaches a second member too")))
+
+(deftest unverified-is-neither-a-grant-nor-an-ordinary-denial
+  (testing "the same facts, differing only in whether a signature was checked"
+    (let [ok (decide whole g1 "2026-08-31T00:00:00Z" :verified? true)
+          no (decide whole g1 "2026-08-31T00:00:00Z" :verified? false)]
+      (is (true? (:pass/allowed? ok)))
+      (is (false? (:pass/allowed? no)))
+      (is (= :pass/unverified (:pass/reason no)))
+      (is (not= (:pass/reason ok) (:pass/reason no)))))
+  (testing "required, not defaulted, and only the literal true"
+    (is (= :pass/unverified (:pass/reason (bk/authorize {:token-model whole
+                                                         :kinds read-kinds
+                                                         :requested g1
+                                                         :now "2026-08-31T00:00:00Z"}))))
+    (is (= :pass/unverified (:pass/reason (decide whole g1 "2026-08-31T00:00:00Z"
+                                                  :verified? "yes"))))))
+
+(deftest authorize-distinguishes-why-it-refused
+  (testing "expired: the token is real, the window is not"
+    (let [d (decide whole g1 "2026-09-02T00:00:00Z")]
+      (is (= :expired-or-no-trusted-time (:pass/reason d)))
+      (is (true? (bk/retry-with-payment? (:pass/reason d))))))
+  (testing "out of scope: real, and does not reach this"
+    (let [narrow (model [['cap "graph-read" g1] ['before "2026-09-01T00:00:00Z"]])
+          d (decide narrow g2 "2026-08-31T00:00:00Z")]
+      (is (= :out-of-scope (:pass/reason d)))
+      (is (true? (bk/retry-with-payment? (:pass/reason d))))))
+  (testing "a kind this caller does not accept confers nothing, visibly, and a
+            new grant would not help"
+    (let [wrong (model [['cap "graph-write" star] ['before "2026-09-01T00:00:00Z"]])
+          d (decide wrong g1 "2026-08-31T00:00:00Z")]
+      (is (= :pass/no-grant (:pass/reason d)))
+      (is (= [{:kind :graph-write :resource star}] (:pass/rejected d)))
+      (is (false? (bk/retry-with-payment? (:pass/reason d)))))))
+
+(deftest authorize-folds-through-the-lattice-not-string-identity
+  (testing "narrowing a wildcard is the ordinary act and must not fold to nothing"
+    (let [narrowed (model [['cap "graph-read" star] ['before "2026-09-01T00:00:00Z"]]
+                          [['cap "graph-read" g1]])]
+      (is (true? (:pass/allowed? (decide narrowed g1 "2026-08-31T00:00:00Z"))))
+      (is (false? (:pass/allowed? (decide narrowed g2 "2026-08-31T00:00:00Z"))))))
+  (testing "and a later block cannot widen"
+    (let [widened (model [['cap "graph-read" g1] ['before "2026-09-01T00:00:00Z"]]
+                         [['cap "graph-read" star]])]
+      (is (false? (:pass/allowed? (decide widened g2 "2026-08-31T00:00:00Z"))))))
+  (testing "a later block may shorten the bound, and the shorter one binds"
+    (let [short (model [['cap "graph-read" star] ['before "2026-09-01T00:00:00Z"]]
+                       [['before "2026-08-31T00:00:00Z"]])]
+      (is (true? (:pass/allowed? (decide short g1 "2026-08-30T00:00:00Z"))))
+      (is (false? (:pass/allowed? (decide short g1 "2026-08-31T12:00:00Z")))))))
+
+(deftest an-unparseable-resource-grants-nothing-including-itself
+  (let [junk (model [['cap "graph-read" "not-a-scope"] ['before "2026-09-01T00:00:00Z"]])]
+    (is (false? (:pass/allowed? (decide junk g1 "2026-08-31T00:00:00Z"))))
+    (is (false? (:pass/allowed? (decide junk "not-a-scope" "2026-08-31T00:00:00Z"))))))

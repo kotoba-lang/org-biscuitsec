@@ -9,7 +9,7 @@
   The decisive column is not cost at all — it is what a compromise of the
   distribution point buys an attacker — but that column is a property, not a
   number, so it is printed beside the arithmetic rather than folded into it."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (def params
   {:verifications-per-month 1000000

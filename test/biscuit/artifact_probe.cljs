@@ -27,7 +27,7 @@
   (:require ["node:fs" :as fs]
             ["node:child_process" :as cp]
             ["node:path" :as path]
-            [clojure.string :as str]))
+            [kotoba.lang.text :as str]))
 
 (defn ->doc [x]
   (cond

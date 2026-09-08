@@ -25,7 +25,7 @@
   pushes one, a binary pops two and pushes one. A well-formed expression leaves
   exactly one value. Anything else -- underflow, leftovers, a non-boolean at
   the end of a check -- is refused rather than guessed at."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (def binary-ops
   "The binary operators this repo evaluates, by their spec enum value.

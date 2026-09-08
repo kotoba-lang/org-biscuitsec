@@ -9,7 +9,7 @@
 
   What this stand-in must NOT do is be forgeable in a way that hides a chain
   defect, so it binds the payload and the key together and nothing else."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (defn keypair [seed] {:private (str "priv:" seed) :public (str "pub:" seed)})
 

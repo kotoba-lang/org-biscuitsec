@@ -48,7 +48,7 @@
   `biscuit-auth`'s own `test001_basic.bc` was allowed to decide which one a
   real token uses. The test is what keeps that honest."
   (:require [biscuit.expression :as x]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [protobuf.wire :as pb]))
 
 (def version "biscuit/wire-v3")

@@ -36,7 +36,7 @@
             [authority.grant :as grant]
             [authority.scope :as scope]
             [clojure.set :as set]
-            [clojure.string :as str]))
+            [kotoba.lang.text :as str]))
 
 (defn- fact->kind [v]
   (when (string? v)

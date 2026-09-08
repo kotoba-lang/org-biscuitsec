@@ -10,7 +10,7 @@
             [biscuit.datalog :as datalog]
             [biscuit.kotoba :as kotoba]
             [biscuit.token :as token]
-            [clojure.string :as str]))
+            [kotoba.lang.text :as str]))
 
 (def compiler-facts-format :kotoba.compiler-facts/v1)
 (def max-facts 4096)

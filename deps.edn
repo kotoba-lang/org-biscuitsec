@@ -15,7 +15,7 @@
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
-                      {:git/tag "v0.5.1" :git/sha "dfb30dd"}
+                      {:git/tag "v0.5.1" :git/sha "dfb30dd6605cb6c0efc275e1df1736f6e90d4d73"}
                       ;; Real Ed25519 for the one suite that must not use a
                       ;; stand-in. Test-only: this library injects sign/verify
                       ;; and must not acquire a curve implementation.

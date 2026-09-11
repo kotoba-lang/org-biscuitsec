@@ -363,7 +363,7 @@ them.
 
 ## Verification
 
-`clojure -M:test` and `npm run test:nbb` — **49 tests, 120 assertions**, both
+`kbb -M:test` and `npm run test:nbb` — **49 tests, 120 assertions**, both
 green. Shown red on ten real defects and green again with each reverted:
 
 | broken | failures |

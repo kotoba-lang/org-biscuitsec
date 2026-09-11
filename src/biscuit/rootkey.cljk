@@ -160,7 +160,7 @@
 
   Records are **immutable and content-addressed**, so a reader caches each
   one forever and re-fetches only when the tip moves — which is the arithmetic
-  that made this the cheapest verifiable option (`bench/keydist.cljs`).
+  that made this the cheapest verifiable option (`bench/keydist.cljk`).
 
   `record-digest-fn` addresses a whole record. It is a different function from
   the `digest-fn` that addresses a public key, and passing one where the other

@@ -84,11 +84,52 @@
     (into (set (keep scope/render (scope/meet-sets ea la)))
           (set/intersection eo lo))))
 
+(defn- holder-binding
+  "Who the token is addressed to, folded across blocks the way every other
+  fact is: **a later block may only narrow.**
+
+  -> `{:holder did-or-nil}` or `{:refused :holder-ambiguous|:holder-readdressed}`.
+
+  | earlier | later block says | result |
+  |---|---|---|
+  | nobody (bearer) | `holder(b)` | bound to b -- addressing a bearer token narrows it |
+  | a | `holder(a)` | still a |
+  | a | `holder(b)`, b ≠ a | **refused** `:holder-readdressed` |
+  | any | two different holders in one block | **refused** `:holder-ambiguous` |
+
+  Until 2026-09-24 only the authority block was read. Both directions of that
+  were wrong: a bearer token its holder addressed to a delegate stayed a
+  bearer token, and a token addressed to alice that a later block re-addressed
+  to mallory stayed alice's -- so the parent kept using what it had handed on
+  (superproject adr-2608220100: not reading the address widens authority).
+
+  A re-addressed token is refused rather than resolved either way. Taking the
+  later holder would let whoever holds the proof secret move someone else's
+  token to themselves; keeping the earlier one is the defect above. Neither is
+  narrowing, so the token confers nothing and says why."
+  [blocks]
+  (reduce (fn [{:keys [holder] :as acc} b]
+            (let [hs (into #{} (keep (fn [[p v]] (when (= 'holder p) v))) (:block/facts b))]
+              (cond
+                (empty? hs) acc
+                (< 1 (count hs)) (reduced {:holder nil :refused :holder-ambiguous})
+                (nil? holder) {:holder (first hs)}
+                (= holder (first hs)) acc
+                :else (reduced {:holder nil :refused :holder-readdressed}))))
+          {:holder nil}
+          blocks))
+
 (defn ->delegated
   "Verified token + the semantics' `:kinds` set -> Kotoba grants.
 
   -> `{:grants [{:grant/kind :grant/resources :grant/expires :grant/id} …]
-       :grant/rejected [...]}`
+       :grant/holder did-or-nil :grant/rejected [...]
+       :grant/refused :holder-readdressed|:holder-ambiguous  ; only when refused}`
+
+  `holder` folds across blocks like everything else (see `holder-binding`):
+  a later block may address a bearer token, may repeat the holder, and may
+  never re-address it. A token whose holder facts conflict has `:grants []`
+  and names the conflict in `:grant/refused`.
 
   Facts read: `[cap <kind> <resource>]` and `[before <instant>]`. Everything
   else stays available to checks and policies and confers nothing — the same
@@ -138,18 +179,20 @@
                                                   (when (seq n) [k n])))))
                                    acc))))
                        {} per-block)
-        authority-facts (get-in t [:biscuit/blocks 0 :block/facts])
-        holders (into #{} (keep (fn [[p v]] (when (= 'holder p) v))) authority-facts)
+        {:keys [holder refused]} (holder-binding blocks)
         befores (keep (fn [[p v]] (when (= 'before p) v))
                       (mapcat :block/facts blocks))
         expires (when (seq befores) (reduce (fn [a b] (if (neg? (compare a b)) a b)) befores))]
-    {:grants (vec (for [[k rs] folded]
-                    (cond-> {:grant/kind k
-                             :grant/resources (vec (sort rs))
-                             :grant/id (str "biscuit:" (hash [k (sort rs)]))}
-                      expires (assoc :grant/expires expires))))
-     :grant/holder (when (= 1 (count holders)) (first holders))
-     :grant/rejected @rejected}))
+    (cond-> {:grants (if refused
+                       []
+                       (vec (for [[k rs] folded]
+                              (cond-> {:grant/kind k
+                                       :grant/resources (vec (sort rs))
+                                       :grant/id (str "biscuit:" (hash [k (sort rs)]))}
+                                expires (assoc :grant/expires expires)))))
+             :grant/holder holder
+             :grant/rejected @rejected}
+      refused (assoc :grant/refused refused))))
 
 (defn missing-grant?
   "`:missing-grant :deny` — a token that delegates nothing denies everything,
@@ -215,11 +258,20 @@
   (if-not (true? verified?)
     {:pass/allowed? false :pass/reason :pass/unverified :pass/grants []}
     (let [delegated (->delegated token-model kinds)]
-      (if (missing-grant? delegated)
+      (cond
+        (:grant/refused delegated)
+        {:pass/allowed? false
+         :pass/reason (:grant/refused delegated)
+         :pass/grants []
+         :pass/rejected (:grant/rejected delegated)}
+
+        (missing-grant? delegated)
         {:pass/allowed? false
          :pass/reason :pass/no-grant
          :pass/grants []
          :pass/rejected (:grant/rejected delegated)}
+
+        :else
         (let [expires (:grant/expires (first (:grants delegated)))
               decision (chain/authorize {:chain (->chain token-model kinds expires)
                                          :requested requested

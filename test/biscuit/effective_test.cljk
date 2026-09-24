@@ -1,13 +1,22 @@
 (ns biscuit.effective-test
   "The proving slice, and a contract test against the language's own file."
-  (:require [biscuit.effective :as eff]
+  (:require [biscuit.ed25519 :as e]
+            [biscuit.effective :as eff]
             [biscuit.keys :as k]
             [biscuit.token :as bt]
+            [biscuit.wire :as w]
             [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
             #?(:cljs ["node:fs" :as fs])))
 
-(def semantics-path "../kotoba-lang/lang/capability-semantics.edn")
+(def semantics-path
+  "The sibling checkout, west layout. `KOTOBA_LANG` names a different
+  kotoba-lang root (a directory holding `kotoba-lang/`), for a worktree that
+  is not beside its siblings."
+  (str (or #?(:clj (System/getenv "KOTOBA_LANG")
+              :cljs (some-> js/process .-env .-KOTOBA_LANG))
+           "..")
+       "/kotoba-lang/lang/capability-semantics.edn"))
 
 (defn read-semantics []
   (try (edn/read-string #?(:clj (slurp semantics-path)
@@ -128,6 +137,72 @@
            (:reason (call t {:cap/kind :graph-read :cap/resource "kotoba://graph/acme"}
                           {:policy {:policy/allow ["*"] :policy/forbid-wildcard true}}))))))
 
+;; ── a wire (v3 protobuf) token ───────────────────────────────────────────────
+;;
+;; Until 2026-09-24 `authorize` verified every token with `biscuit.token/verify`,
+;; which recomputes an EDN payload. A wire token -- what Authn mints and what
+;; `biscuit-auth` mints -- is signed over protobuf bytes, so every genuine one
+;; failed: handed over decoded it was `:unknown-version`, and converted with
+;; `token->model` and relabelled it was `:signature-mismatch`. The consumer
+;; that found it (cloud-kotoba kotoba-cloud-storage) had to verify the chain
+;; itself and hand `authorize` a verify-fn that repeated the answer.
+
+(def wroot (e/keypair (vec (range 32))))
+(def wk1 (e/keypair (vec (range 32 64))))
+
+(defn- wire-token [facts]
+  (w/decode-token
+   (w/encode-authority-token {:facts facts
+                              :root-private-key (:private wroot)
+                              :next-secret (vec (range 32 64))
+                              :next-public-key (:public wk1)
+                              :sign-fn e/sign-bytes-fn})))
+
+(defn- wire-call [t & [requested]]
+  (eff/authorize {:semantics semantics :token t
+                  :root-public-key (:public wroot) :verify-fn e/verify-bytes-fn
+                  :requested (or requested {:cap/kind :graph-read
+                                            :cap/resource "kotoba://graph/acme"})
+                  :local-policy {:policy/allow ["kotoba://graph/acme"]
+                                 :policy/forbid-wildcard true}
+                  :now "2026-08-19T00:00:00Z" :call "graph/read"}))
+
+(deftest a-wire-token-is-verified-over-the-bytes-it-was-signed-over
+  (let [t (wire-token '[[cap "graph-read" "kotoba://graph/acme"]
+                        [before "2099-01-01T00:00:00Z"]])
+        d (wire-call t)]
+    (is (true? (:allowed? d)) (str "refused as " (:reason d)))
+    (is (= "kotoba://graph/acme" (get-in d [:capability :cap/resource])))
+    (testing "and the intersection still runs on the wire token's facts"
+      (is (= :missing-grant
+             (:reason (wire-call t {:cap/kind :graph-write
+                                    :cap/resource "kotoba://graph/acme"})))))))
+
+(deftest a-wire-token-under-another-root-is-refused
+  (let [attacker (e/keypair (vec (map #(+ 100 %) (range 32))))
+        forged (w/decode-token
+                (w/encode-authority-token {:facts '[[cap "graph-read" "kotoba://graph/acme"]]
+                                           :root-private-key (:private attacker)
+                                           :next-secret (vec (range 32 64))
+                                           :next-public-key (:public wk1)
+                                           :sign-fn e/sign-bytes-fn}))
+        d (wire-call forged)]
+    (is (= :signature-mismatch (:reason d)))
+    (is (= :denied (get-in d [:receipt :receipt/outcome])))))
+
+(deftest a-wire-token-with-an-edited-block-is-refused
+  (let [t (wire-token '[[cap "graph-read" "kotoba://graph/acme"]])
+        other (wire-token '[[cap "graph-read" "kotoba://graph/everything"]])
+        ;; splice block bytes from another token under this token's signature
+        spliced (assoc-in t [:blocks 0 :block] (get-in other [:blocks 0 :block]))]
+    (is (= :signature-mismatch (:reason (wire-call spliced))))))
+
+(deftest a-converted-wire-model-is-refused-rather-than-reverified-as-edn
+  (testing "token->model drops the signed bytes, so nothing can check it; the
+            answer is a named refusal, not a verification over the wrong payload"
+    (let [m (w/token->model (wire-token '[[cap "graph-read" "kotoba://graph/acme"]]))]
+      (is (= :wire-model-not-verifiable (:reason (wire-call m)))))))
+
 ;; ---------------------------------------------------------------------------
 
 (def contract-rules
@@ -160,7 +235,24 @@
           (is (contains? (:rules real) r)
               (str "rule " r " is no longer in the semantics — this guard branches on it")))
         (is (set? (:kinds real)))
-        (is (pos? (count (:kinds real)))))
+        (is (pos? (count (:kinds real))))
+        (testing "this three-term guard refuses the language's own file while
+                  its effective scope names the five-origin join: the Amu and
+                  runtime origins are not inputs here, so a pass would be a
+                  weaker reading of the contract (use biscuit.kotoba-logic)"
+          (when (= :statically-possible-intersect-requested-intersect-delegated-intersect-local-policy-intersect-runtime-available
+                   (get-in real [:rules :effective-scope]))
+            (is (= :logic-authorizer-required
+                   (:reason (eff/authorize
+                             {:semantics real
+                              :token (token '[[cap "graph-read" "kotoba://graph/acme"]])
+                              :root-public-key (:public root) :verify-fn k/verify-fn
+                              :requested {:cap/kind :graph-read
+                                          :cap/resource "kotoba://graph/acme"}
+                              :local-policy {:policy/allow ["kotoba://graph/acme"]
+                                             :policy/forbid-wildcard true}
+                              :now "2026-08-19T00:00:00Z" :call "graph/read"}))))))
+        (println (str "READ drift check: " semantics-path)))
       ;; Distinct from a pass, and printed, because "飛ばした" and "合格した"
       ;; must be distinguishable in the output (root ADR-2608136000).
       (println (str "SKIPPED drift check: " semantics-path

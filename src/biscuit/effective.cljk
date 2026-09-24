@@ -31,7 +31,8 @@
   what lets this run in a Worker, a browser or on an untrusted mirror — and
   is the entire reason the centre is biscuit rather than macaroon."
   (:require [biscuit.kotoba :as bk]
-            [biscuit.token :as bt]))
+            [biscuit.token :as bt]
+            [biscuit.wire :as wire]))
 
 (def receipt-keys
   "What `:receipt-requirements` names. Kept as data so the test can compare
@@ -43,6 +44,54 @@
            :receipt/cap cap :receipt/outcome outcome}
     detail (assoc :receipt/detail detail)))
 
+(defn- wire-token?
+  "A token as `biscuit.wire/decode-token` returns it: the signed block BYTES
+  are still present, so the signatures can be checked over what was signed."
+  [t]
+  (and (map? t) (vector? (:blocks t)) (not (contains? t :biscuit/blocks))))
+
+(defn- verified-model
+  "Verify `token` over the bytes it was signed over and return the model the
+  intersection reads.
+
+  -> `{:ok? true :model m}` or `{:ok? false :reason kw}`.
+
+  ## Two shapes, two verifiers, one answer each
+
+  | token | verified by | payload |
+  |---|---|---|
+  | `biscuit.token` model (`:biscuit/version` = `biscuit/edn-v1`) | `biscuit.token/verify` | canonical EDN |
+  | decoded wire token (`biscuit.wire/decode-token`) | `biscuit.wire/verify` | the v3 protobuf bytes |
+  | `biscuit.wire/token->model` output | **nobody** -- refused `:wire-model-not-verifiable` | the bytes are gone |
+
+  Until 2026-09-24 every token went through `biscuit.token/verify`. A wire
+  token -- what Authn and `biscuit-auth` mint -- is signed over protobuf bytes,
+  so a genuine one could only fail (`:unknown-version` as decoded, and
+  `:signature-mismatch` once converted and relabelled). A consumer then had
+  to verify the chain itself and pass a verify-fn that repeated its answer,
+  which is a second verifier living outside this library.
+
+  A converted model is refused by name rather than relabelled: it no longer
+  carries what was signed, so no check over it can mean anything."
+  [token root-public-key verify-fn]
+  (cond
+    (wire-token? token)
+    (let [v (try (wire/verify token root-public-key verify-fn)
+                 (catch #?(:clj Exception :cljs :default) _
+                   {:ok? false :reason :malformed-token}))]
+      (if-not (:ok? v)
+        v
+        (try {:ok? true :model (wire/token->model token)}
+             (catch #?(:clj Exception :cljs :default) _
+               {:ok? false :reason :malformed-token}))))
+
+    (and (map? token) (= wire/version (:biscuit/version token)))
+    {:ok? false :reason :wire-model-not-verifiable}
+
+    :else
+    (let [v (bt/verify token root-public-key verify-fn)]
+      (if (:ok? v) {:ok? true :model token} v))))
+
 (defn- wildcard? [x] (or (= :any x) (= "*" x) (= :* x)))
 
 (defn authorize
@@ -51,6 +100,11 @@
   `{:semantics <capability-semantics map> :token t :root-public-key pk
     :verify-fn f :requested {:cap/kind k :cap/resource r} :local-policy p
     :now instant :call name}`
+
+  `:token` is either a `biscuit.token` model or a decoded wire token
+  (`biscuit.wire/decode-token`); each is verified over the payload it was
+  signed over (see `verified-model`). For a wire token `verify-fn` receives
+  byte vectors, as `biscuit.wire/verify` documents.
 
   -> `{:allowed? bool :reason kw :capability {…}|nil :receipt {…}}`
 
@@ -64,7 +118,8 @@
                {:allowed? false :reason reason :capability nil
                 :receipt (receipt {:now now :call call :cap requested
                                    :outcome :denied :detail (or detail reason)})})
-        v (bt/verify token root-public-key verify-fn)]
+        v (verified-model token root-public-key verify-fn)
+        token (:model v)]
     (cond
       (not (:ok? v))
       (deny (:reason v))
@@ -85,9 +140,14 @@
       (deny :unknown-kind)
 
       :else
-      (let [{:keys [grants]} (bk/->delegated token kinds)
+      (let [{:keys [grants] :as delegated} (bk/->delegated token kinds)
             matching (filter #(= kind (:grant/kind %)) grants)]
         (cond
+          ;; A token whose holder facts conflict across blocks confers
+          ;; nothing (`biscuit.kotoba/->delegated`); say which conflict
+          ;; rather than letting it read as an ordinary missing grant.
+          (:grant/refused delegated)
+          (deny (:grant/refused delegated))
           (and (= :deny (:missing-grant rules)) (empty? matching))
           (deny :missing-grant)
 

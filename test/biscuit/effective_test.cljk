@@ -5,7 +5,7 @@
             [biscuit.keys :as k]
             [biscuit.token :as bt]
             [biscuit.wire :as w]
-            [clojure.edn :as edn]
+            [kotoba.lang.edn :as edn]
             [kotoba.test :refer [deftest is testing]]
             #?(:cljs ["node:fs" :as fs])))
 

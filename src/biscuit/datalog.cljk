@@ -33,7 +33,7 @@
   `:budget-exceeded`, never an empty result set. A truncated derivation that
   answered `no facts` would be an authorizer that denies for the wrong
   reason today and allows for the wrong reason tomorrow."
-  (:require [clojure.set :as set]))
+  (:require [kotoba.lang.coll :as set]))
 
 (def default-budget
   "Facts an evaluation may derive before it refuses. Deliberately small: a

@@ -117,3 +117,16 @@
   (let [decision (call {:now nil})]
     (is (= :invalid-runtime-context (:reason decision)))
     (is (= :denied (get-in decision [:receipt :receipt/outcome])))))
+
+(deftest a-re-addressed-token-is-refused-by-name
+  (testing "a later block naming a different holder confers nothing, and the
+            refusal says so rather than reading as :wrong-holder"
+    (let [t (token/append (biscuit [])
+                          {:facts [['holder "did:key:zMallory"]]
+                           :next-public-key (:public next-key)
+                           :private-key (:private next-key)
+                           :sign-fn keys/sign-fn})
+          d (call {:token t})]
+      (is (false? (:allowed? d)))
+      (is (= :holder-readdressed (:reason d)))
+      (is (nil? (:capability d))))))

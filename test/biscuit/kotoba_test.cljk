@@ -225,3 +225,63 @@
   (let [junk (model [['cap "graph-read" "not-a-scope"] ['before "2026-09-01T00:00:00Z"]])]
     (is (false? (:pass/allowed? (decide junk g1 "2026-08-31T00:00:00Z"))))
     (is (false? (:pass/allowed? (decide junk "not-a-scope" "2026-08-31T00:00:00Z"))))))
+
+;; ── holder across blocks: attenuation may only narrow ─────────────────────────
+;;
+;; Until 2026-09-24 `->delegated` read `holder` from the authority block only.
+;; That was wrong in both directions: a bearer token narrowed to one holder by a
+;; later block stayed a bearer token, and a token addressed to alice that a later
+;; block re-addressed to mallory stayed alice's -- so the parent could keep using
+;; what it delegated. The consumer that found it (cloud-kotoba
+;; kotoba-cloud-storage) had to refuse every later holder fact by name.
+
+(defn- attenuate [t facts]
+  (bt/append t {:facts facts :next-public-key (:public k1)
+                :private-key (:private k1) :sign-fn k/sign-fn}))
+
+(deftest a-later-block-may-address-a-bearer-token
+  (testing "adding a holder to a token that named none is narrowing"
+    (let [d (bk/->delegated (attenuate (tok '[[cap "graph-read" "kotoba://graph/acme"]])
+                                       '[[holder "did:key:zBob"]])
+                            kinds)]
+      (is (= "did:key:zBob" (:grant/holder d)))
+      (is (= 1 (count (:grants d))) "and the grant it narrows survives")
+      (is (nil? (:grant/refused d))))))
+
+(deftest repeating-the-same-holder-keeps-the-binding
+  (let [d (bk/->delegated (attenuate (tok '[[holder "did:key:zAlice"]
+                                            [cap "graph-read" "kotoba://graph/acme"]])
+                                     '[[holder "did:key:zAlice"]])
+                          kinds)]
+    (is (= "did:key:zAlice" (:grant/holder d)))
+    (is (= 1 (count (:grants d))))
+    (is (nil? (:grant/refused d)))))
+
+(deftest a-later-block-cannot-re-address-a-token
+  (testing "a different later holder is refused by name, and confers nothing --
+            never the later holder, and never the earlier one either"
+    (let [d (bk/->delegated (attenuate (tok '[[holder "did:key:zAlice"]
+                                              [cap "graph-read" "kotoba://graph/acme"]])
+                                       '[[holder "did:key:zMallory"]])
+                            kinds)]
+      (is (= :holder-readdressed (:grant/refused d)))
+      (is (nil? (:grant/holder d)))
+      (is (= [] (:grants d)))
+      (is (bk/missing-grant? d)))))
+
+(deftest one-block-naming-two-holders-binds-no-one
+  (let [d (bk/->delegated (tok '[[holder "did:key:zAlice"] [holder "did:key:zMallory"]
+                                 [cap "graph-read" "kotoba://graph/acme"]])
+                          kinds)]
+    (is (= :holder-ambiguous (:grant/refused d)))
+    (is (nil? (:grant/holder d)))
+    (is (= [] (:grants d)))))
+
+(deftest authorize-names-a-re-addressed-token
+  (let [t (attenuate (tok '[[holder "did:key:zAlice"]
+                            [cap "graph-read" "kotoba://graph/acme"]])
+                     '[[holder "did:key:zMallory"]])]
+    (is (= :holder-readdressed
+           (:pass/reason (bk/authorize {:token-model t :kinds kinds :verified? true
+                                        :requested "kotoba://graph/acme"
+                                        :now "2026-08-19T00:00:00Z"}))))))

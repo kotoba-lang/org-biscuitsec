@@ -179,6 +179,11 @@
               (not static?)
               (denial :missing-static-effect decision-base)
 
+              ;; holder facts that conflict across blocks confer nothing;
+              ;; name the conflict instead of reporting :wrong-holder
+              (:grant/refused delegated)
+              (denial (:grant/refused delegated) decision-base)
+
               (not world?)
               (denial :runtime-unavailable decision-base)
 

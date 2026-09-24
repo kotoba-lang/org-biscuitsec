@@ -149,6 +149,18 @@ centre is biscuit and not macaroon.
 ;;     :receipt {:receipt/at … :receipt/call … :receipt/cap … :receipt/outcome :allowed}}
 ```
 
+`:token` is a `biscuit.token` model **or a decoded wire token**
+(`biscuit.wire/decode-token`). Each is verified over the payload it was signed
+over — the EDN payload for a model, the v3 protobuf bytes via
+`biscuit.wire/verify` for a wire token. A `biscuit.wire/token->model` result is
+refused as `:wire-model-not-verifiable`: the signed bytes are gone, so nothing
+can check it.
+
+`holder` folds across blocks and may only narrow (`biscuit.kotoba/->delegated`):
+a later block may address a bearer token or repeat the holder; a later block
+naming a different holder, or one block naming two, confers nothing and is
+refused by name (`:holder-readdressed` / `:holder-ambiguous`).
+
 **The rules are read, not restated.** `authorize` takes the semantics map and
 branches on its `:rules`; copying `:unknown-kind :deny` into a `case` here
 would make this a second statement of the language's policy. A contract test

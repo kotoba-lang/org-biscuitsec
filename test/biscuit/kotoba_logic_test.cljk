@@ -2,7 +2,7 @@
   (:require [biscuit.keys :as keys]
             [biscuit.kotoba-logic :as logic]
             [biscuit.token :as token]
-            [clojure.test :refer [deftest is testing]]))
+            [kotoba.test :refer [deftest is testing]]))
 
 (def cid "bafkreihteekkh5xzrg6bat5mjthbtylimi36nifl62c2ladfyftplijcke")
 (def root (keys/keypair "root"))

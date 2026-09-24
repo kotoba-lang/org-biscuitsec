@@ -9,7 +9,7 @@
   (:require [biscuit.ed25519 :as e]
             [biscuit.effective :as eff]
             [biscuit.token :as bt]
-            [clojure.test :refer [deftest is testing]]))
+            [kotoba.test :refer [deftest is testing]]))
 
 (def root (e/keypair (vec (range 32))))
 (def k1 (e/keypair (vec (range 32 64))))

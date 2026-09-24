@@ -1,5 +1,5 @@
 (ns run-nbb-tests
-  (:require [clojure.test :as t]
+  (:require [kotoba.test :as t]
             [biscuit.datalog-test]
             [biscuit.token-test]
             [biscuit.authority-test]

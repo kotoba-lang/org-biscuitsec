@@ -1,6 +1,6 @@
 (ns biscuit.datalog-test
   (:require [biscuit.datalog :as d]
-            [clojure.test :refer [deftest is testing]]))
+            [kotoba.test :refer [deftest is testing]]))
 
 (deftest rules-reach-a-fixpoint
   (let [facts '[[parent "a" "b"] [parent "b" "c"]]

@@ -9,7 +9,7 @@
   (:require [biscuit.authorizer :as az]
             [biscuit.ed25519 :as e]
             [biscuit.wire :as w]
-            [clojure.test :refer [deftest is testing]]))
+            [kotoba.test :refer [deftest is testing]]))
 
 ;; ── run-checks: the wire path's missing half ────────────────────────────────
 

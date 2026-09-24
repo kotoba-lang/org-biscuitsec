@@ -1,6 +1,6 @@
 (ns biscuit.expression-test
   (:require [biscuit.expression :as x]
-            [clojure.test :refer [deftest is testing]]))
+            [kotoba.test :refer [deftest is testing]]))
 
 ;; ops は postfix。`$t < 100` は [値 $t][値 100][binary LessThan]
 (defn- lt [a b] [[:value a] [:value b] [:binary 0]])

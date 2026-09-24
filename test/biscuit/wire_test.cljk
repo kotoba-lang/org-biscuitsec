@@ -10,7 +10,7 @@
             [biscuit.ed25519 :as e]
             [biscuit.kotoba :as bk]
             [biscuit.wire :as w]
-            [clojure.test :refer [deftest is testing]]
+            [kotoba.test :refer [deftest is testing]]
             [protobuf.wire :as pb]
             #?(:cljs ["node:fs" :as fs])))
 

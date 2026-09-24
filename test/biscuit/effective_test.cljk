@@ -6,7 +6,7 @@
             [biscuit.token :as bt]
             [biscuit.wire :as w]
             [clojure.edn :as edn]
-            [clojure.test :refer [deftest is testing]]
+            [kotoba.test :refer [deftest is testing]]
             #?(:cljs ["node:fs" :as fs])))
 
 (def semantics-path

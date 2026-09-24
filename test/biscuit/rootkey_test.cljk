@@ -1,7 +1,7 @@
 (ns biscuit.rootkey-test
   (:require [biscuit.ed25519 :as e]
             [biscuit.rootkey :as rk]
-            [clojure.test :refer [deftest is testing]]))
+            [kotoba.test :refer [deftest is testing]]))
 
 (def subject "kotobase.net/graph/acme")
 

@@ -4,7 +4,7 @@
             [biscuit.authority :as ba]
             [biscuit.keys :as k]
             [biscuit.token :as bt]
-            [clojure.test :refer [deftest is testing]]))
+            [kotoba.test :refer [deftest is testing]]))
 
 (def root (k/keypair "root"))
 (def k1 (k/keypair "one"))

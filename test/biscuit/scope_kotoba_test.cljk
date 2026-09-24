@@ -45,7 +45,7 @@
             [biscuit.kotoba :as bk]
             [biscuit.token :as bt]
             [biscuit.scope-guest-document :refer [->doc]]
-            [clojure.java.io :as io]
+            [kotoba.io :as io]
             [kotoba.test :refer [deftest is testing]]
             [kotoba.compiler.core :as compiler]
             [kotoba.kir :as ir]))
@@ -129,7 +129,7 @@
 ;; --- tests -----------------------------------------------------------------------
 
 (deftest guest-source-is-present
-  (is (.exists guest-file) (str "kotoba object not found at " guest-file)))
+  (is (io/exists? guest-file) (str "kotoba object not found at " guest-file)))
 
 (deftest the-guest-agrees-with-authorize
   (doseq [[label facts request policy expected]

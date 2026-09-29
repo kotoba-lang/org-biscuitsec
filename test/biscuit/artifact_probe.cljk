@@ -7,7 +7,7 @@
 ;; the interpreter.
 ;;
 ;; nbb rather than a `.mjs`: this workspace does not add raw JavaScript
-;; harnesses (CLAUDE.md, runtime priority).
+;; harnesses (AGENTS.md, runtime priority).
 ;;
 ;; This guest is a STREAM -- `init` then a fact at a time then `end-block`,
 ;; each returning the next state -- so the probe passes the guest's own
